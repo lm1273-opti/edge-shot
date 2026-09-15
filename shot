@@ -1,0 +1,349 @@
+#!/usr/bin/env node
+// edge-shot CLI — ezt hívja a Claude skill. Gondoskodik róla, hogy a szerver fusson.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+// A gyökér a SZKRIPT helye, ne a HOME: máshova klónozva is működnie kell.
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const LOG = path.join(ROOT, 'server.log');
+
+if (!fs.existsSync(path.join(ROOT, 'config.json'))) {
+  console.error(`Nincs config.json — futtasd előbb: ${path.join(ROOT, 'install.sh')}`);
+  process.exit(2);
+}
+const CFG = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+const BASE = `http://127.0.0.1:${CFG.port || 8765}`;
+const HDR = { 'x-shot-token': CFG.token };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function health() {
+  try {
+    const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(1500) });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+
+async function ensureServer() {
+  let h = await health();
+  if (h) return h;
+  const out = fs.openSync(LOG, 'a');
+  spawn(process.execPath, [path.join(ROOT, 'server.mjs')],
+        { detached: true, stdio: ['ignore', out, out] }).unref();
+  for (let i = 0; i < 40; i++) {
+    await sleep(150);
+    h = await health();
+    if (h) return h;
+  }
+  throw new Error(`a szerver nem indult el — nézd meg: ${LOG}`);
+}
+
+// MÉRVE: a `--tab 12a` NaN-t adott, ami JSON-ban null lett, és a bővítmény némán az
+// AKTÍV fület fotózta. Egy bizonyíték-eszközben a néma célt-tévesztés a legrosszabb.
+function num(v, name, { min, max, integer } = {}) {
+  if (v === undefined || v === true) return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n) || (integer && !Number.isInteger(n))) {
+    console.error(`a --${name} értéke nem ${integer ? 'egész ' : ''}szám: ${v}`); process.exit(1);
+  }
+  if (min !== undefined && n < min) { console.error(`a --${name} nem lehet ${min}-nél kisebb (kaptam: ${n})`); process.exit(1); }
+  if (max !== undefined && n > max) { console.error(`a --${name} nem lehet ${max}-nél nagyobb (kaptam: ${n})`); process.exit(1); }
+  return n;
+}
+
+function parseArgs(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) out[k] = true;
+      else { out[k] = next; i++; }
+    } else out._.push(a);
+  }
+  return out;
+}
+
+const USAGE = `
+edge-shot — veszteségmentes képernyőkép az Edge-ből, fájlba
+
+  shot health                       a szerver és az extension állapota
+  shot tabs                         a nyitott fülek (id, cím, URL)
+  shot probe --selector "<css>"     mit talál a selector, és mekkora (elem-mód előtt)
+  shot check                        fordul-e a bővítmény forrása (reload előtt automatikus)
+  shot reload                       a bővítmény újratöltése kódváltozás után
+  shot <név> [kapcsolók]            kép készítése
+
+Kapcsolók:
+  --mode viewport|fullpage|element  alapértelmezés: viewport
+  --selector "<css>"                element módhoz kötelező
+  --padding <px>                    element módhoz, alapértelmezés 0
+  --tab <id>                        cél fül azonosítója
+  --match "<szöveg>"                cél fül URL/cím részlet alapján
+  --mobile [szélesség]              mobil viewport-emuláció (alap: 390)
+  --scale <n>                       device pixel ratio, alapértelmezés 2
+  --settle <ms>                     várakozás a fotó előtt
+  --url                             fehér sáv a kép tetején, benne feketén az URL
+                                    (bug-jegyhez, ahol a konvenció a látszó címsáv)
+
+Videó (eseménysorhoz, nem állóképhez):
+  shot rec-start <nev> [--quality low|normal|high] [--selector "<css>"] [--gif]
+  shot rec-stop                     lezár, kódol, kiírja az útvonalat
+  shot rec <nev> --seconds 8        fix hosszú felvétel egy lépésben
+  shot rec-status                   fut-e felvétel, hány kocka van meg
+  shot rec-stop --force             idegen session felvételének leállítása (tudatosan)
+
+Több párhuzamos session:
+  --session <id>                    ki vagy (alap: a munkamenet azonosítója)
+  A fájlnevek ütközés esetén -2, -3 toldalékot kapnak, nincs néma felülírás.
+  Felvétel alatt MÁS fül nem fotózható és nem szondázható: előhozása befagyasztaná
+  a felvételt. A hibaüzenet megmondja, ki és melyik fülön rögzít.
+
+Példák:
+  shot the-modal --tab 42 --mode element --selector ".modal" --padding 8
+  shot teljes-lap --mode fullpage
+  shot mobil-nezet --mobile 375
+`;
+
+// A session-azonosító teszi lehetővé, hogy a szerver megmondja, KI birtokol egy
+// felvételt, és hogy ne lehessen véletlenül leállítani másét. Alapból a munkamenet
+// scratchpad-könyvtárának neve, ami sessiononként egyedi; enélkül "anon".
+// MÉRVE 2026-09-15: a korábbi automatikus kitalálás MINDIG "anon"-t adott (a feltételezett
+// környezeti változó nem létezik), tehát a tulajdonos-védelem hatástalan volt: anon === anon.
+// Nem a kód volt rossz, a feltételezés. Most kimondjuk, ha nincs azonosító.
+function sessionId(explicit) {
+  if (explicit && typeof explicit === 'string') return explicit;
+  if (process.env.EDGE_SHOT_SESSION) return process.env.EDGE_SHOT_SESSION;
+  return 'anon';
+}
+
+function warnAnon(id) {
+  if (id !== 'anon') return;
+  console.error('MEGJEGYZÉS: nincs session-azonosító, ezért a felvétel tulajdonos-védelme nem véd.');
+  console.error('  Több párhuzamos munkamenetnél: --session <id> vagy EDGE_SHOT_SESSION=<id>.');
+}
+
+const a = parseArgs(process.argv.slice(2));
+const cmd = a._[0];
+
+if (!cmd || a.help) { console.log(USAGE); process.exit(a.help ? 0 : 1); }
+
+const h = await ensureServer();
+
+if (cmd === 'health') {
+  console.log(JSON.stringify(h, null, 2));
+  if (!h.extensionConnected) {
+    console.error('\nFIGYELEM: az extension nincs csatlakozva.');
+    console.error('  • fut az Edge?  • be van töltve a bővítmény az edge://extensions alatt?');
+    console.error('  • ha igen, kattints egyszer a bővítmény ikonjára — az újraindítja a kapcsolatot.');
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+const kbFmt = (n) => n == null ? '?' : `${Math.round(n / 1024)} KB`;
+
+async function post(pathname, payload) {
+  const r = await fetch(`${BASE}${pathname}`, {
+    method: 'POST', headers: { ...HDR, 'content-type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+  return { ok: r.ok, body: await r.json() };
+}
+
+if (cmd === 'rec-start' || cmd === 'rec') {
+  // Az ffmpeg hiánya különben csak a rec-stop-nál derülne ki, amikorra a felvétel már megvan.
+  if (spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status !== 0) {
+    console.error('nincs ffmpeg a PATH-on, videót nem tudok kódolni. macOS: brew install ffmpeg');
+    process.exit(1);
+  }
+  // A `--seconds` ellenőrzése a felvétel INDÍTÁSA ELŐTT: különben egy hibás érték
+  // elindítja a felvételt, majd kilép, és árva felvétel marad a szerveren.
+  const secs = num(a.seconds ?? a.sec, 'seconds', { min: 1, max: 120 }) ?? 5;
+  const name = a._[1];
+  if (!name) { console.error('használat: shot rec-start <nev> [--tab <id>|--match <szöveg>] [--quality low|normal|high] [--selector "<css>"] [--gif]'); process.exit(1); }
+  const payload = {
+    name, tabId: num(a.tab, 'tab', { integer: true, min: 1 }),
+    match: typeof a.match === 'string' ? a.match : undefined,
+    quality: typeof a.quality === 'string' ? a.quality : 'normal',
+    selector: a.selector, gif: !!a.gif, session: sessionId(a.session),
+  };
+  warnAnon(payload.session);
+  const st = await post('/rec/start', payload);
+  if (!st.ok) { console.error(`HIBA: ${st.body.error}`); process.exit(1); }
+  console.log(`FELVÉTEL indul  id=${st.body.recId}  minőség=${st.body.preset}`);
+  console.log(`FÜL  ${st.body.tabTitle}`);
+  console.log(`URL  ${st.body.tabUrl}`);
+  if (st.body.cssRect) console.log(`VÁGÁS  a(z) "${payload.selector}" elem: ${Math.round(st.body.cssRect.width)}×${Math.round(st.body.cssRect.height)} CSS px`);
+
+  if (cmd === 'rec-start') {
+    if (a.seconds !== undefined || a.sec !== undefined) {
+      console.error('a --seconds a `shot rec` alakhoz tartozik; a rec-start nyitva hagyja a felvételt.');
+      console.error(`Fix hosszhoz:  shot rec ${name} --seconds ${a.seconds ?? a.sec}`);
+      await post('/rec/stop', { session: sessionId(a.session), force: true });
+      process.exit(1);
+    }
+    console.log('\nA fül MOSTANTÓL elöl kell maradjon, különben a videó befagy.');
+    console.log('Vezéreld a lapot, majd:  shot rec-stop');
+    process.exit(0);
+  }
+  // Megszakításnál különben a felvétel a 120 s-os plafonig foglalva maradna.
+  const onInt = async () => {
+    console.error('\nmegszakítva, lezárom a felvételt...');
+    try { await post('/rec/stop', { session: sessionId(a.session), force: true }); } catch { /* a szerver eltűnt */ }
+    process.exit(130);
+  };
+  process.on('SIGINT', onInt);
+  process.on('SIGTERM', onInt);
+  console.log(`\nrögzítés ${secs} másodpercig...`);
+  await sleep(secs * 1000);
+}
+
+if (cmd === 'rec-stop' || cmd === 'rec') {
+  const r = await post('/rec/stop', { session: sessionId(a.session), force: !!a.force });
+  const j = r.body;
+  if (!r.ok) { console.error(`HIBA: ${j.error}`); process.exit(1); }
+  console.log(`\nMP4  ${j.mp4Path}  (${kbFmt(j.mp4Bytes)})`);
+  if (j.gifPath) console.log(`GIF  ${j.gifPath}  (${kbFmt(j.gifBytes)})`);
+  console.log(`HOSSZ  ${j.durationSec} s   KOCKA  ${j.frames} érkezett -> ${j.encodedFrames} kódolva 30 fps-en`);
+  console.log(`MÉRT KOCKASEBESSÉG  ${j.measuredFps}/mp   MINŐSÉG  ${j.quality}`);
+  if (j.crop) console.log(`VÁGÁS  ${Math.round(j.crop.w)}×${Math.round(j.crop.h)} @ ${Math.round(j.crop.x)},${Math.round(j.crop.y)}  (mért szorzó ${j.cropScale})`);
+  if (j.sizes.length > 1) console.log(`FIGYELEM: a kockaméret változott a felvétel alatt (${j.sizes.join(', ')}) — a videó nyújtva lehet.`);
+  if (j.measuredFps < 2) console.log(`FIGYELEM: mindössze ${j.frames} kocka ${j.wallSec} másodperc alatt. A lap gyakorlatilag nem rajzolt: a videó szinte állókép. Ha mozgást vártál, a fül vagy háttérbe került, vagy tényleg nem történt semmi.`);
+  if (j.hiddenSec > 0.5) console.log(`FIGYELEM: a fül ${j.hiddenSec} másodpercig rejtve volt; ez alatt NINCS kocka, a videó befagyva mutatja.`);
+  if (j.stopError) console.log(`MEGJEGYZÉS: a leállítás hibázott (${j.stopError}), de a meglévő kockákból kódoltam.`);
+  if (/-\d+\.mp4$/.test(j.mp4Path)) console.log('MEGJEGYZÉS: a név foglalt volt (másik session), ezért toldalékot kapott.');
+  console.log(`URL  ${j.tabUrl}`);
+  process.exit(0);
+}
+
+if (cmd === 'rec-status') {
+  const r = await fetch(`${BASE}/rec/status`, { headers: HDR });
+  const j = await r.json();
+  if (!j.active) {
+    console.log('nem fut felvétel');
+    if (j.orphanDirs.length) console.log(`árva kocka-könyvtárak: ${j.orphanDirs.join(', ')}`);
+  } else {
+    console.log(`fut: ${j.name} (${j.recId})  állapot=${j.state}  kocka=${j.frames}  eltelt=${j.elapsedSec}s / ${j.maxSec}s  rejtve=${j.hiddenSec}s`);
+  }
+  process.exit(0);
+}
+
+if (cmd === 'probe') {
+  const sel = a.selector || a._[1];
+  if (!sel) { console.error('használat: shot probe --selector "<css>" [--match <szöveg>|--tab <id>]'); process.exit(1); }
+  const r = await fetch(`${BASE}/probe`, {
+    method: 'POST', headers: { ...HDR, 'content-type': 'application/json' },
+    body: JSON.stringify({ selector: sel, match: typeof a.match === 'string' ? a.match : undefined, tabId: num(a.tab, 'tab', { integer: true, min: 1 }) }),
+  });
+  const j = await r.json();
+  if (!r.ok) { console.error(`HIBA: ${j.error}`); process.exit(1); }
+  console.log(`${j.count} találat`);
+  for (const m of j.matches) {
+    console.log(`  <${m.tag}>${m.id ? '#' + m.id : ''}${m.cls ? '.' + m.cls.trim().split(/\s+/).join('.') : ''}  ${m.w}×${m.h}${m.visible ? '' : '  (REJTETT)'}`);
+  }
+  process.exit(j.count ? 0 : 1);
+}
+
+// Egy szintaktikai hiba a bővítmény forrásában úgy öli meg a service workert, hogy az
+// el sem indul — és onnantól a `reload` sem érhető el, mert az is a bővítményen megy át.
+// Ezért a forrást MINDIG ellenőrizzük, mielőtt újratöltést kérnénk. (2026-09-14-én élőben
+// megtörtént: egy duplán deklarált `dataUrl` bebetonozta a bővítményt, kézi kattintás kellett.)
+function checkExtensionSyntax() {
+  const dir = path.join(ROOT, 'extension');
+  const errors = [];
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+    const tmp = path.join(os.tmpdir(), `edge-shot-check-${f}.mjs`);
+    fs.copyFileSync(path.join(dir, f), tmp);
+    const r = spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf8' });
+    fs.unlinkSync(tmp);
+    if (r.status !== 0) errors.push(`${f}:\n${(r.stderr || '').trim()}`);
+  }
+  return errors;
+}
+
+if (cmd === 'check') {
+  const errors = checkExtensionSyntax();
+  if (errors.length) { console.error('SZINTAKTIKAI HIBA:\n' + errors.join('\n\n')); process.exit(1); }
+  console.log('a bővítmény forrása fordul ✓');
+  process.exit(0);
+}
+
+if (cmd === 'reload') {
+  const errors = checkExtensionSyntax();
+  if (errors.length) {
+    console.error('ÚJRATÖLTÉS MEGTAGADVA — a bővítmény forrása nem fordul:\n');
+    console.error(errors.join('\n\n'));
+    console.error('\nJavítsd a hibát, aztán próbáld újra. (Ha most töltenéd újra, a service');
+    console.error('worker el sem indulna, és csak kézi kattintással lehetne visszahozni.)');
+    process.exit(1);
+  }
+  const r = await fetch(`${BASE}/reload`, { method: 'POST', headers: HDR });
+  const j = await r.json();
+  if (!r.ok) { console.error(j.error); process.exit(1); }
+  await sleep(1500);
+  const h2 = await health();
+  console.log(h2?.extensionConnected ? 'bővítmény újratöltve, csatlakozva ✓' : 'újratöltve, de még nem csatlakozott — várj pár másodpercet');
+  process.exit(0);
+}
+
+if (cmd === 'tabs') {
+  const r = await fetch(`${BASE}/tabs`, { headers: HDR });
+  const j = await r.json();
+  if (!r.ok) { console.error(j.error); process.exit(1); }
+  for (const t of j.tabs) {
+    console.log(`${String(t.id).padStart(6)}${t.active ? ' *' : '  '} ${(t.title || '').slice(0, 60).padEnd(60)} ${t.url}`);
+  }
+  process.exit(0);
+}
+
+const job = {
+  name: cmd,
+  mode: a.mode || 'viewport',
+  selector: a.selector,
+  padding: num(a.padding, 'padding', { min: 0, max: 400 }) ?? 0,
+  tabId: num(a.tab, 'tab', { integer: true, min: 1 }),
+  match: typeof a.match === 'string' ? a.match : undefined,
+  scale: num(a.scale, 'scale', { min: 1, max: 4 }),
+  settleMs: num(a.settle, 'settle', { min: 0, max: 10000 }),
+  urlBar: !!a.url,
+};
+if (a.mobile) {
+  const w = a.mobile === true ? 390 : num(a.mobile, 'mobile', { integer: true, min: 200, max: 2000 });
+  job.device = { width: w, height: 844, deviceScaleFactor: 3 };
+}
+if (job.mode === 'element' && !job.selector) {
+  console.error('element módhoz kell --selector'); process.exit(1);
+}
+// Videó-kapcsolók állóképnél: a `shot <nev> --seconds 5` élőben elgépelhető a
+// `shot rec <nev> --seconds 5` helyett, és némán egy képet adna videó helyett.
+for (const flag of ['seconds', 'sec', 'gif']) {
+  if (a[flag] !== undefined) {
+    console.error(`a --${flag} videó-kapcsoló, de te állóképet kértél.`);
+    console.error(`Videóhoz:  shot rec ${cmd} ${process.argv.slice(3).join(' ')}`);
+    process.exit(1);
+  }
+}
+
+const r = await fetch(`${BASE}/shot`, {
+  method: 'POST', headers: { ...HDR, 'content-type': 'application/json' },
+  body: JSON.stringify(job),
+});
+const j = await r.json();
+if (!r.ok) { console.error(`HIBA: ${j.error}`); process.exit(1); }
+
+const kb = (n) => n == null ? '?' : `${Math.round(n / 1024)} KB`;
+console.log(`PNG  ${j.pngPath}  (${j.width}×${j.height}, ${kb(j.pngBytes)})`);
+if (j.jpgPath) console.log(`JPG  ${j.jpgPath}  (${kb(j.jpgBytes)}) — artifactba ezt`);
+if (/-\d+\.png$/.test(j.pngPath)) console.log('MEGJEGYZÉS: a név foglalt volt (másik session), ezért toldalékot kapott.');
+if (j.jpgErr) console.log(`FIGYELEM: a kicsinyített JPEG-iker nem készült el (${j.jpgErr}). macOS-en kívül a sips hiányzik; artifacthoz kicsinyítsd kézzel.`);
+if (j.jpgBytes > 400 * 1024) {
+  console.log(`\nFIGYELEM: a JPEG ${kb(j.jpgBytes)}, base64-ben ~${kb(j.jpgBytes * 1.37)} — ez sok egy artifacthoz.`);
+  console.log('  Szűkítsd a képet: --mode element --selector "<a lényegi rész>", vagy fotózz viewportot fullpage helyett.');
+}
+if (j.barPx) console.log(`SÁV  ${j.barPx} px URL-sáv a kép tetején (DPR ${j.scaleUsed})`);
+console.log(`FÜL  ${j.tabTitle}`);
+console.log(`URL  ${j.tabUrl}`);

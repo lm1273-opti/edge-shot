@@ -1,0 +1,8 @@
+{
+  "name": "edge-shot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lossless screenshots and real-time recordings from your logged-in Microsoft Edge",
+  "engines": { "node": ">=18" }
+}

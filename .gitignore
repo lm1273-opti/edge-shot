@@ -1,0 +1,9 @@
+# Generated at install time and UNIQUE TO YOUR MACHINE. Never commit these.
+config.json
+extension/config.js
+
+# Runtime output
+server.log
+screenshots/
+*.bak-*
+.DS_Store

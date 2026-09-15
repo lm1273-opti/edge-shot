@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Edge Shot (Claude)",
+  "version": "1.0.0",
+  "description": "Veszteségmentes képernyőképek kérésre a Claude Code számára, egy loopback szerveren keresztül.",
+  "permissions": ["tabs", "debugger", "scripting", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "sw.js", "type": "module" },
+  "action": { "default_title": "Edge Shot — kattints az újracsatlakozáshoz" }
+}
