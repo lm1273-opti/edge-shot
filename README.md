@@ -50,18 +50,78 @@ cd edge-shot
 ./install.sh
 ```
 
-The installer generates a private token, writes the two config files, and prints the one manual
-step that cannot be automated:
+The installer generates a private token, writes the two config files, installs the Claude
+skill if you say yes, and then prints the one step that cannot be automated: loading the
+extension into your browser.
 
-1. open the extensions page it names for you (`edge://extensions`, `chrome://extensions`, …)
-2. turn on **Developer mode**
-3. **Load unpacked** and pick the `extension/` folder of this repo
+### Loading the extension
 
-Load it into **one** browser only. Tab ids are per-browser, so a second copy would make
+This is a normal "unpacked extension" install. It takes about thirty seconds and you only
+do it once.
+
+**1. Open the extensions page.** Type the address in the address bar; it will not appear in
+a normal search.
+
+| Browser | Address |
+|---|---|
+| Edge | `edge://extensions` |
+| Chrome | `chrome://extensions` |
+| Brave | `brave://extensions` |
+| Chromium | `chromium://extensions` |
+
+**2. Turn on Developer mode.** This is the step people miss, and without it the button you
+need in step 3 does not exist at all. It is a toggle switch labelled **Developer mode** —
+but the two browsers put it in different corners:
+
+```
+EDGE                                  CHROME
+┌────────────────┬──────────────────┐ ┌─────────────────────────────────────┐
+│                │                  │ │  Extensions            [Developer ●]│  <- top RIGHT
+│  Extensions    │   your           │ ├─────────────────────────────────────┤
+│  ...           │   extensions     │ │ [Load unpacked] [Pack] [Update]     │
+│                │                  │ │                                     │
+│ [Developer ●]  │                  │ │   your extensions                   │
+└────────────────┴──────────────────┘ └─────────────────────────────────────┘
+   ^ bottom LEFT of the sidebar
+```
+
+Once the toggle is on, a new row of buttons appears: **Load unpacked**, **Pack extension**,
+**Update**. If you do not see them, the toggle is still off.
+
+> Your browser's interface may be in another language; look for the toggle in the corner
+> shown above rather than for the exact English words.
+
+**3. Click "Load unpacked"** and select the **`extension/` folder inside this repository** —
+the folder itself, not a file inside it, and not the repository root. The installer prints
+the exact absolute path; copy it into the folder picker.
+
+A card titled **edge-shot** should now appear in the list. If the browser shows a warning
+about extensions in developer mode, that is expected for any unpacked extension and can be
+dismissed; the extension keeps working.
+
+**4. Verify.**
+
+```bash
+./shot health
+```
+
+`extensionConnected` should be `true` and `browsers` should name your browser. If it is
+`false`, click the extension's icon in the toolbar once to wake its service worker, and
+try again.
+
+### After a browser restart
+
+Nothing to do: the extension loads itself and reconnects. If you ever pull a new version of
+this repository, click the **reload** (↻) icon on the extension's card, or run
+`./shot reload`, which refuses to reload source that does not compile.
+
+### One browser only
+
+Load it into **one** browser. Tab ids are per-browser, so a second copy would make
 `--tab 42` ambiguous; the server notices two browsers connected and refuses to work rather
 than guessing, because a capture from the wrong browser would look perfectly correct.
 
-To choose the browser yourself, set `EDGE_SHOT_BROWSER=Chrome` before running the installer.
+To pick the browser yourself, set `EDGE_SHOT_BROWSER=Chrome` before running the installer.
 
 Then check it:
 

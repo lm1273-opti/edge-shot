@@ -59,12 +59,14 @@ detect_browser() {
 }
 
 BROWSER="$(detect_browser)"
+# The Developer mode toggle sits in a different corner in Edge than in the others,
+# and this is the step people miss: without it the "Load unpacked" button does not exist.
 case "$BROWSER" in
-  Edge)     EXT_URL="edge://extensions" ;;
-  Chrome)   EXT_URL="chrome://extensions" ;;
-  Chromium) EXT_URL="chromium://extensions" ;;
-  Brave)    EXT_URL="brave://extensions" ;;
-  *)        EXT_URL="chrome://extensions" ;;
+  Edge)     EXT_URL="edge://extensions";     DEV_WHERE="bottom-left of the sidebar" ;;
+  Chrome)   EXT_URL="chrome://extensions";   DEV_WHERE="top-right of the page" ;;
+  Chromium) EXT_URL="chromium://extensions"; DEV_WHERE="top-right of the page" ;;
+  Brave)    EXT_URL="brave://extensions";    DEV_WHERE="top-right of the page" ;;
+  *)        EXT_URL="chrome://extensions";   DEV_WHERE="top-right of the page" ;;
 esac
 
 mkdir -p "$ROOT/extension"
@@ -113,9 +115,16 @@ cat <<TXT
   Done. One manual step is left, once and for all:
 
     1. Open  $EXT_URL   (in $BROWSER)
-    2. Turn on "Developer mode" (bottom left)
-    3. "Load unpacked" and choose this folder:
+       Type it in the address bar; it will not come up in a search.
+
+    2. Turn on the "Developer mode" toggle, $DEV_WHERE.
+       Without it, the button in step 3 does not appear at all.
+
+    3. Click "Load unpacked" and choose this FOLDER (not a file inside it):
        $ROOT/extension
+
+       A card named "edge-shot" should appear in the list. A warning about
+       developer-mode extensions is normal for any unpacked extension.
 
   Then verify:  $ROOT/shot health
 
