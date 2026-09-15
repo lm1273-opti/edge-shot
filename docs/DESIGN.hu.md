@@ -1,6 +1,13 @@
 # edge-shot — design
 
-*2026-09-14. Állapot: implementálva és végponttól végpontig mérve.*
+*Magyar nyelvű tervezési és mérési napló. A használati dokumentáció a repó gyökerében lévő
+angol `README.md`.*
+
+*Első kiadás: 2026-09-14. Utolsó frissítés: 2026-09-15.*
+
+A napló azért van így felépítve, hogy látszódjon, **mit hittem és mit mért a valóság**. A
+későbbi körök ugyanezt a formát követik: minden szakasz külön jelöli, mi bizonyított
+futtatásból, és mi maradt következtetés.
 
 ## A probléma
 
@@ -119,3 +126,117 @@ Minden alábbi állítás **futtatással** igazolt, nem kódolvasásból követk
 - **`shot reload`** — a bővítmény forró újratöltése, hogy a kódváltozáshoz ne kelljen
   kézi kattintás az `edge://extensions` alatt.
 - **Méret-figyelmeztetés** 400 KB fölött, a base64-becsléssel együtt.
+
+
+---
+
+# 2. kör (2026-09-15) — videó
+
+A cél: eseménysort rögzíteni, amit két állóképpel nehéz megmutatni.
+
+## Az eredeti terv, ami MÉRÉSEN dőlt meg
+
+| Feltevés | Mit mutatott a mérés |
+|---|---|
+| „Másodpercenként 24 képet készítünk és összefűzzük" | Nem járható: egy kocka ~1 MB PNG, körutazásonként. Helyette `Page.startScreencast`, ami folyamatosan tolja a JPEG-kockákat. |
+| A felvétel egy feladat lehet | **Nem.** A bővítményben 60 s-os feladat-korlát és 90 s-os őrkutya van, és amíg egy feladat fut, a ciklus nem pollozik, tehát a leállítás sem jutna át. A start és a stop két RÖVID feladat, a felvétel a cikluson kívül él. |
+| A kockasebességet ejtéssel korlátozzuk | A **nyugtázás késleltetése** fékez, és a böngésző nem is gyártja a fölösleges kockát. Mérve: ack 0 ms → 90 kocka/mp, 40 → 57, 100 → 27, 200 → 14. |
+| A vágás szorzója a device pixel ratio | **`frameW / deviceWidth`.** Mérve 0,714 (maxWidth 1280) és 0,502 (maxWidth 900); a DPR 2 lenne, azaz 2,8-szeres tévedés. A kocka pixelmérete csak az első kockából derül ki, és ingadozik (1262×686 vs 1280×664 ugyanazon a lapon). |
+| Az ffmpeg `concat` demuxer jó időzítést ad | **Hamis hossz:** 4,5 s helyett 2,56 s (az utolsó `duration` elvész). Helyette fix 30 fps-re mintavételezünk, ami pontosan 4,500000 s-ot ad. |
+| A képméret bármi lehet | Páratlan méret + `yuv420p` → **0 bájtos fájl**, néma bukás. A vágás páros-kényszerítése a szűrőben van. |
+
+## A hossz FAL-ÓRA alapú, nem a kocka-ív
+
+Élőben elkövetett hiba: statikus lapról 1 kocka jön, a kocka-ív 0 mp, és egy „sikeres"
+**0 másodperces** videó keletkezett 5 mp kérés helyett. A kapu nulla kockát őrzött, de 1 kocka
+nem nulla — **a kapu rossz mennyiséget nézett**.
+
+## Igazolt valós idejűség
+
+A rögzített lap saját másodperc-számlálója a videó 0,5. és 5,5. másodperce között
+**5,02 másodpercet** lépett. Ezt rontotta volna el a concat-módszer.
+
+## Nyitott, NEM megmagyarázott
+
+Navigáció felvétel közben 3-ból 2 futásban helyesen látszik, 1-ben a videó a navigáció
+előtti lapot mutatta a végén. Lapváltásos felvételt nézz meg, mielőtt bizonyítékként
+használod.
+
+---
+
+# 3. kör (2026-09-15) — több párhuzamos session
+
+Alapmérés: 3 párhuzamos session 3 fülön, 3/3 körben mindenki a **saját lapját** kapta (a
+fájlok tartalmából visszaazonosítva). A feladat-sor sorosít, tehát fotózásnál nincs fül-verseny.
+
+Négy NÉMA hiba, amit ez feltárt:
+
+1. **Fájlnév-ütközés.** Két session, azonos másodperc, azonos név → ugyanaz az út, néma
+   felülírás, mindkettő „OK". Javítás: atomi `wx` névfoglalás, `-2`/`-3` toldalék.
+2. **TOCTOU a felvétel-indításnál.** A check és az assign közt `await` állt, így két
+   egyidejű indítás mindkettője átjutott, és a második hibaága törölte az ELSŐ, élő felvétel
+   nyilvántartását.
+3. **A lejárt feladat a sorban maradt**, és később „szellem-feladatként" lefutott: fület
+   rántott elő idegen felvétel alatt, vagy elindított egy felvételt, amiről a szerver már
+   nem tudott.
+4. **A `probe` előhozta a fület és sosem állította vissza** — egy harmadik session
+   szondázása befagyasztotta a futó videót.
+
+**A helyes tiltó-szabály** felvétel alatt nem „semmi más nem mehet", hanem: *a felvett
+fültől ELTÉRŐ fület nem szabad előhozni*. Ugyanarra a fülre a szondázás engedett (nem
+csatol), a fotózás nem (a debugger már csatolva van).
+
+---
+
+# 4. kör (2026-09-15) — bármelyik Chromium böngésző
+
+A capture-kód eleve hordozható volt: mind a 36 hívás a szabványos `chrome.*` névtérben megy.
+Ami Edge-specifikus volt, az a szöveg és a telepítő.
+
+**Amit a Chrome-támogatás BEHOZOTT:** ha a bővítmény két böngészőbe is be van töltve,
+mindkettő ugyanazt a szervert pollozza, és a feladat-kiosztás nem tudja, melyikről van szó.
+Mivel a fül-azonosítók böngészőnként mások, egy `--tab 42` a **rossz böngésző** egy létező
+fülét fotózhatná le — helyesnek látszó képpel.
+
+Megoldás: nem okos útválasztás, hanem **tiszta elutasítás**. A bővítmény minden pollnál
+megmondja, melyik böngészőben fut; amíg kettő csatlakozik, a szerver megnevezi mindkettőt és
+nem dolgozik. A bejegyzés 60 mp után elévül, tehát egy eltűnt böngésző nem blokkol örökre.
+
+---
+
+# 5. kör (2026-09-15) — publikálás előtti megerősítés
+
+Két független review (egy általános és egy kifejezetten biztonsági) leletei, mind javítva:
+
+| Hiba | Következmény |
+|---|---|
+| **Bármilyen hibás JSON megölte a szervert** | Futó felvétel esetén az egész szerver-oldali állapot elveszett |
+| **A `--tab 12a` némán az AKTÍV fület fotózta** | Helyes kép, rossz lapról — a legrosszabb hibaosztály |
+| **A `/health` token nélkül kiadta a felhasználónevet és az abszolút utat** | Információ-szivárgás egy hitelesítés nélküli útvonalon |
+| **Idegen `Host` fejlécre válaszolt** | DNS-rebinding: egy weblap elérhette a loopback szervert |
+| **A kimeneti fájlok 644-esek voltak** | Közös gépen bárki elolvashatta a bejelentkezett fülről készült képet |
+| **A `EDGE_SHOT_PORT` validálatlanul került a bővítmény kódjába** | Tetszőleges JS becsempészhető egy `debugger` jogú service workerbe |
+| **A `$ROOT` JS-stringbe interpolálva a telepítőben** | Aposztrófot tartalmazó klón-útvonal = JS-injekció |
+| **A vágás-kapu az ffmpeg UTÁN dobott** | A hibaüzenet azt állította, hogy nincs vágatlan videó, miközben az már a lemezen volt |
+
+Az utolsó a saját, előző körben bevitt javításom mellékhatása volt: **egy hibaüzenet, ami
+mást mond, mint ami a lemezen van, rosszabb, mint maga a hiba.**
+
+Igazolt támadási utak, mind zárva: útvonal-kiszökés a fájlnéven át (`../../../../tmp/evil`
+→ `tmp-evil`), ffmpeg-flag-injekció (`-rf` → `rf`), shell-metakarakterek, token a
+parancssorban (nem: fejlécben megy), selector-injekció (adatként megy a page-scriptbe).
+
+---
+
+# 6. kör (2026-09-15) — a telepítő
+
+Cél: ember és AI-ügynök is végig tudja vinni, utóbbi terminál nélkül.
+
+- Minden kérdésnek van kapcsolója (`--yes`, `--no-skill`), `--json` gépileg olvasható
+  összefoglalóval, és megkülönböztetett kilépési kódok (2 használat, 3 node, 4 port,
+  5 sérült config, 6 nincs böngésző).
+- Az újrafuttatás explicit idempotens: a meglévő `config.json` **tokenje ÉS portja** marad,
+  hogy a két konfigurációs fájl sose divergáljon.
+- **A skill soha nem települ némán.** Egy skill olyan prompt, ami egy AI-ügynök viselkedését
+  módosítja, tehát a legnagyobb bizalmi lépés a telepítésben: interaktívan kérdez, nem
+  interaktívan kihagyja, és megmondja, mivel telepíthető utólag.

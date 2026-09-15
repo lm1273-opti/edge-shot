@@ -156,6 +156,53 @@ Then check it:
 
 The local server starts itself on demand; there is nothing to run in the background.
 
+## Command reference
+
+```bash
+shot health                      # is the server up, which browser is connected
+shot tabs                        # open tabs: id, title, URL
+shot probe --selector "<css>"    # what a selector matches, and how big
+shot check                       # does the extension source compile
+shot reload                      # reload the extension after changing its code
+shot rec-status                  # is a recording running, how many frames so far
+shot --help                      # everything below, from the tool itself
+```
+
+> The CLI's own messages and its `--help` are currently in Hungarian. The tables below say
+> the same thing in English; the flags themselves are of course the same.
+
+
+**Stills.** The first argument is the file name:
+
+```bash
+shot <name> [--tab <id> | --match <text>] [options]
+```
+
+| Option | Meaning |
+|---|---|
+| `--mode viewport` | The visible area (default) |
+| `--mode fullpage` | The whole document in one piece, no scrolling seams |
+| `--mode element --selector "<css>"` | Just that element; `--padding <px>` adds a margin |
+| `--mobile [width]` | Mobile emulation at that CSS width (default 390), device pixel ratio 3 |
+| `--url` | Adds a white bar on top carrying the page URL, for tickets that want it visible |
+| `--scale 1-4` | Device pixel ratio of the output (default 2) |
+| `--settle <ms>` | Wait before capturing, up to 10000, for pages that animate in |
+| `--session <id>` | Who you are; see the concurrency note below |
+
+**Video.**
+
+```bash
+shot rec-start <name> [--quality low|normal|high] [--selector "<css>"] [--gif]
+#   … drive the page …
+shot rec-stop [--force]
+shot rec <name> --seconds 1-120  # fixed length, start and stop in one command
+```
+
+Every capture writes a lossless PNG plus a width-capped JPEG twin (or an MP4) into
+`~/.claude/screenshots/<date>/`, and prints both paths, the pixel size, and the title and
+URL of the tab it photographed. Use those last two when you describe the image: they are
+what makes a caption checkable.
+
 ## Which browser am I actually driving?
 
 Whichever one you loaded the extension into. You do not pick per command, and you do not
@@ -295,6 +342,18 @@ declines), and never overwrites an existing one.
 
 Install it deliberately. A skill is a prompt that changes how an AI agent behaves, so it is the
 most sensitive file in this repository — read it before you say yes, especially in a fork.
+
+## Documentation
+
+- **This README** is the usage documentation.
+- **[`docs/DESIGN.hu.md`](docs/DESIGN.hu.md)** is a design and measurement log, **written in
+  Hungarian**. It records why each decision was made and, more usefully, the assumptions that
+  turned out to be wrong when measured: that a background tab can be captured, that the
+  ffmpeg concat demuxer preserves timing, that the crop factor is the device pixel ratio, and
+  several others. Read it if you want to change the internals, or if you are curious how much
+  of this was discovered rather than designed.
+- **[`skill/SKILL.md`](skill/SKILL.md)** is the Claude Code skill: when to reach for a capture,
+  which mode actually proves a point, and which traps to avoid.
 
 ## License
 
