@@ -71,6 +71,29 @@ Then check it:
 
 The local server starts itself on demand; there is nothing to run in the background.
 
+## Which browser am I actually driving?
+
+Whichever one you loaded the extension into. You do not pick per command, and you do not
+have to remember: `shot health` tells you.
+
+```console
+$ shot health
+{
+  "ok": true,
+  "port": 8765,
+  "extensionConnected": true,
+  "browsers": ["Edge"]
+}
+```
+
+If `browsers` lists **two**, every command is refused until you remove one copy, and the
+error names both browsers.
+
+That refusal is deliberate. Guessing here would produce a screenshot that is sharp,
+correctly named, and of the wrong page — the one failure mode this tool exists to avoid.
+An entry expires 60 seconds after that browser stops polling, so closing one browser
+unblocks things on its own.
+
 ## How it works
 
 ```
@@ -111,7 +134,8 @@ Timing is real: on a page carrying its own on-screen clock, the counter advanced
   recording is still the right length, but it is effectively a still image, and the tool says so.
 - **Full-page mode can equal viewport mode** in apps that scroll inside an inner container. That
   is correct behaviour; use element mode on the scrolling container instead.
-- **The browser's own pages** (`edge://…`) cannot be captured. That is a browser rule.
+- **The browser's own pages** (`edge://…`, `chrome://…`) cannot be captured. Browsers
+  forbid extensions from reading them; this is not something the tool can work around.
 
 ## Portability
 
@@ -127,6 +151,23 @@ Written and measured on macOS with Edge 153 and Node 26. Elsewhere:
   files. Re-running the installer keeps whatever port is already configured.
 - **Tab ids change** when the browser restarts, so never store a `--tab` value; run
   `shot tabs` again.
+
+## Troubleshooting
+
+> **Note on language:** the CLI currently prints its messages in Hungarian. The table below
+> describes the situations rather than quoting the exact strings, so it stays true either way.
+
+| Situation | What it means |
+|---|---|
+| The extension is reported as not connected | The browser is not running, or its service worker was stopped. Click the extension's toolbar icon once to wake it. After restarting the server, reconnection can take up to a minute. |
+| Two browsers are reported as connected | The extension is loaded into more than one browser; every command is refused until one copy is removed. See above. |
+| `--match` is refused with a list of tabs | The pattern was ambiguous. Use one of the `--tab <id>` values it prints. Refusing beats silently picking the wrong tab. |
+| A selector matched nothing | Run `shot probe --selector "…" --tab <id>`. The element may be inside an iframe (the query runs on the main document) or not rendered yet (`--settle 1500`). |
+| A capture is refused because a recording is running | A recording holds its tab in the foreground; bringing another tab forward would freeze it. Wait, or `shot rec-stop`. |
+| `shot reload` refuses to run | It checks that the extension source compiles first. Reloading broken source would leave the worker dead and unreachable, recoverable only by clicking reload in the browser. |
+| A long recording contains a single frame | The page never repainted. The screencast is change-driven, so a static page yields almost nothing. The video is still the right length, and the command says so. |
+| Video fails to start | `ffmpeg` is not on your PATH (`brew install ffmpeg`). Stills do not need it. |
+| A file name gained a `-2` suffix | Another session claimed that name in the same second. Nothing was overwritten; this is the collision guard working. |
 
 ## Security
 
