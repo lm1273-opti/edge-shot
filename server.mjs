@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// edge-shot server — loopback-only job broker between Claude Code and the Edge extension.
+// edge-shot server — loopback-only job broker between the CLI and the browser extension.
 // Zero dependencies. Claude POSTs a job; the extension long-polls for it and posts the result back.
 import http from 'node:http';
 import fs from 'node:fs';
@@ -52,6 +52,23 @@ const queue = [];              // jobs not yet handed to the extension
 const waiters = [];            // held GET /poll responses
 const inflight = new Map();    // jobId -> { resolve, reject, timer }
 let extensionLastSeen = 0;
+// Böngésző -> utolsó jelentkezés. Egyszerre CSAK EGY böngésző szolgálhat ki feladatokat:
+// a fül-azonosítók böngészőnként mások, tehát két betöltött bővítmény mellett egy `--tab`
+// a rossz böngésző egy létező fülét fotózhatná le, és a kép helyesnek LÁTSZANA.
+const browsers = new Map();
+const BROWSER_TTL = 60_000;
+
+function liveBrowsers() {
+  const now = Date.now();
+  for (const [b, t] of browsers) if (now - t > BROWSER_TTL) browsers.delete(b);
+  return [...browsers.keys()];
+}
+
+function multiBrowserBlock() {
+  const live = liveBrowsers();
+  if (live.length < 2) return null;
+  return `KÉT BÖNGÉSZŐ csatlakozik egyszerre (${live.join(', ')}). A fül-azonosítók böngészőnként mások, ezért nem tudom eldönteni, melyikre gondolsz, és nem tippelek: egy rossz böngészőből készült kép helyesnek LÁTSZANA. Távolítsd el a bővítményt az egyikből, aztán próbáld újra.`;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const run = (cmd, args) => new Promise((res, rej) =>
@@ -78,7 +95,7 @@ function enqueue(job) {
       if (wasQueued) queue.splice(qi, 1);
       reject(new Error(
         wasQueued
-          ? `időtúllépés: a feladat ${Math.round(JOB_TIMEOUT_MS / 1000)} s alatt nem lett kiosztva (sorban maradt ${queue.length} elem). Fut az Edge, és csatlakozik a bővítmény? shot health`
+          ? `időtúllépés: a feladat ${Math.round(JOB_TIMEOUT_MS / 1000)} s alatt nem lett kiosztva (sorban maradt ${queue.length} elem). Fut a böngésző, és csatlakozik a bővítmény? shot health`
           : 'időtúllépés: a bővítmény átvette a feladatot, de nem válaszolt'));
     }, JOB_TIMEOUT_MS);
     inflight.set(job.id, { resolve, reject, timer });
@@ -180,6 +197,8 @@ function recordingBlock(tabId, what) {
   }
   return `felvétel fut a(z) ${rec.tabUrl || '?'} fülön (tab ${rec.tabId}, tulajdonos ${rec.owner}); más fül ${what}a előhozná azt a fület, és a videó némán befagyna. Várd meg a rec-stop-ot, vagy: shot rec-stop --force`;
 }
+
+function jobBlocked() { return multiBrowserBlock(); }
 
 function tokenOk(req) {
   const t = req.headers['x-shot-token'];
@@ -315,12 +334,14 @@ async function handleRequest(req, res) {
 
   if (url.pathname === '/health') {
     const age = extensionLastSeen ? Date.now() - extensionLastSeen : null;
+    const live = liveBrowsers();
     // A /health szándékosan token nélkül elérhető (a CLI ebből tudja, fut-e a szerver),
     // ezért NEM adhat ki abszolút utat vagy felhasználónevet.
     const pub = {
       ok: true, port: PORT,
       extensionConnected: age !== null && age < 60_000,
       extensionLastSeenMsAgo: age, queued: queue.length,
+      browsers: live,
     };
     if (tokenOk(req)) { pub.pid = process.pid; pub.outRoot = OUT_ROOT; }
     return send(res, 200, pub);
@@ -331,6 +352,7 @@ async function handleRequest(req, res) {
   // --- extension oldal -------------------------------------------------
   if (url.pathname === '/poll' && req.method === 'GET') {
     extensionLastSeen = Date.now();
+    if (req.headers['x-browser']) browsers.set(String(req.headers['x-browser']).slice(0, 20), Date.now());
     if (queue.length) return send(res, 200, queue.shift());
     waiters.push(res);
     res.__holdTimer = setTimeout(() => {
@@ -363,6 +385,7 @@ async function handleRequest(req, res) {
 
   // --- Claude oldal ----------------------------------------------------
   if (url.pathname === '/tabs' && req.method === 'GET') {
+    const mb3 = jobBlocked(); if (mb3) return send(res, 409, { error: mb3 });
     try {
       const r = await enqueue({ id: randomUUID(), kind: 'tabs' });
       return send(res, 200, { tabs: r.tabs });
@@ -410,6 +433,7 @@ async function handleRequest(req, res) {
     let body = '';
     for await (const c of req) body += c;
     const opts = parseBody(body, res); if (!opts) return;
+    const mb4 = jobBlocked(); if (mb4) return send(res, 409, { error: mb4 });
     if (activeRecId) {
       const cur = recordings.get(activeRecId);
       const what = cur?.state === 'capped'
@@ -528,6 +552,7 @@ async function handleRequest(req, res) {
     for await (const c of req) body += c;
     const pb = parseBody(body, res); if (!pb) return;
     const job = { ...pb, id: randomUUID(), kind: 'probe' };
+    const mb2 = jobBlocked(); if (mb2) return send(res, 409, { error: mb2 });
     const pblock = recordingBlock(job.tabId, 'szondázás');
     if (pblock) return send(res, 409, { error: pblock });
     try { return send(res, 200, await enqueue(job)); }
@@ -552,6 +577,7 @@ async function handleRequest(req, res) {
     for await (const c of req) body += c;
     let job;
     try { job = JSON.parse(body); } catch { return send(res, 400, { error: 'hibás JSON' }); }
+    const mb = jobBlocked(); if (mb) return send(res, 409, { error: mb });
     const block = recordingBlock(job.tabId, 'fotózás');
     if (block) return send(res, 409, { error: block });
     job.id = randomUUID();

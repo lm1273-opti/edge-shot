@@ -1,7 +1,21 @@
 import { TOKEN, PORT } from './config.js';
 
 const BASE = `http://127.0.0.1:${PORT}`;
-const HDR = { 'x-shot-token': TOKEN };
+
+// Melyik böngészőben futunk? A fül-azonosítók böngészőnként MÁSOK, ezért ha két
+// böngészőbe is betöltik a bővítményt, a `--tab 42` a rossz böngésző egy létező fülét
+// fotózná le — helyesnek látszó képpel. A szerver ebből veszi észre a helyzetet.
+function detectBrowser() {
+  const ua = navigator.userAgent;
+  if (/\bEdg\//.test(ua)) return 'Edge';
+  if (/\bOPR\//.test(ua)) return 'Opera';
+  if (/\bBrave\//.test(ua)) return 'Brave';
+  if (/\bChrome\//.test(ua)) return 'Chrome';
+  return 'Chromium';
+}
+const BROWSER = detectBrowser();
+
+const HDR = { 'x-shot-token': TOKEN, 'x-browser': BROWSER };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let looping = false;

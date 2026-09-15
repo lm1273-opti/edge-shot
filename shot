@@ -68,7 +68,7 @@ function parseArgs(argv) {
 }
 
 const USAGE = `
-edge-shot — veszteségmentes képernyőkép az Edge-ből, fájlba
+edge-shot — veszteségmentes képernyőkép a bejelentkezett böngésződből, fájlba
 
   shot health                       a szerver és az extension állapota
   shot tabs                         a nyitott fülek (id, cím, URL)
@@ -135,9 +135,12 @@ const h = await ensureServer();
 
 if (cmd === 'health') {
   console.log(JSON.stringify(h, null, 2));
+  if (h.browsers && h.browsers.length > 1) {
+    console.error(`\nFIGYELEM: több böngésző csatlakozik (${h.browsers.join(', ')}). A fül-azonosítók böngészőnként mások, ezért a feladatok le vannak tiltva. Távolítsd el a bővítményt az egyikből.`);
+  }
   if (!h.extensionConnected) {
     console.error('\nFIGYELEM: az extension nincs csatlakozva.');
-    console.error('  • fut az Edge?  • be van töltve a bővítmény az edge://extensions alatt?');
+    console.error('  • fut a böngésző?  • be van töltve a bővítmény (edge:// vagy chrome://extensions)?');
     console.error('  • ha igen, kattints egyszer a bővítmény ikonjára — az újraindítja a kapcsolatot.');
     process.exit(1);
   }

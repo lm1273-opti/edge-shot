@@ -38,6 +38,35 @@ JSON
   echo "Generated a new token."
 fi
 
+# Which Chromium browser will host the extension? The code is identical for all of them
+# (the chrome.* namespace is standard); only the extensions page address differs.
+detect_browser() {
+  if [[ -n "${EDGE_SHOT_BROWSER:-}" ]]; then echo "$EDGE_SHOT_BROWSER"; return; fi
+  case "$(uname -s)" in
+    Darwin)
+      [[ -d "/Applications/Microsoft Edge.app" ]] && { echo Edge; return; }
+      [[ -d "/Applications/Google Chrome.app" ]]  && { echo Chrome; return; }
+      [[ -d "/Applications/Chromium.app" ]]       && { echo Chromium; return; }
+      [[ -d "/Applications/Brave Browser.app" ]]  && { echo Brave; return; }
+      ;;
+    *)
+      command -v microsoft-edge >/dev/null && { echo Edge; return; }
+      command -v google-chrome  >/dev/null && { echo Chrome; return; }
+      command -v chromium       >/dev/null && { echo Chromium; return; }
+      ;;
+  esac
+  echo none
+}
+
+BROWSER="$(detect_browser)"
+case "$BROWSER" in
+  Edge)     EXT_URL="edge://extensions" ;;
+  Chrome)   EXT_URL="chrome://extensions" ;;
+  Chromium) EXT_URL="chromium://extensions" ;;
+  Brave)    EXT_URL="brave://extensions" ;;
+  *)        EXT_URL="chrome://extensions" ;;
+esac
+
 mkdir -p "$ROOT/extension"
 cat > "$ROOT/extension/config.js" <<JS
 // GENERATED FILE - written by install.sh. Do not edit by hand.
@@ -73,15 +102,24 @@ if [[ -f "$ROOT/skill/SKILL.md" ]]; then
   fi
 fi
 
+if [[ "$BROWSER" == "none" ]]; then
+  echo
+  echo "  NOTE: no Chromium-based browser found. Install Edge, Chrome, Chromium or Brave," >&2
+  echo "        or set EDGE_SHOT_BROWSER=Chrome and re-run to get the right instructions." >&2
+fi
+
 cat <<TXT
 
   Done. One manual step is left, once and for all:
 
-    1. Open  edge://extensions
+    1. Open  $EXT_URL   (in $BROWSER)
     2. Turn on "Developer mode" (bottom left)
     3. "Load unpacked" and choose this folder:
        $ROOT/extension
 
   Then verify:  $ROOT/shot health
+
+  Load it into ONE browser only. Tab ids differ per browser, so a second copy would
+  make "--tab 42" ambiguous; the server detects that and refuses rather than guessing.
 
 TXT

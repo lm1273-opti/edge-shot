@@ -1,8 +1,9 @@
 ---
 name: edge-shot
 description: >
-  Capture lossless PNG screenshots and real-time MP4 recordings from the user's
-  LOGGED-IN Microsoft Edge browser, straight to disk. Use whenever visual evidence
+  Capture lossless PNG screenshots and real-time MP4 recordings from the browser the
+  user is ALREADY SIGNED INTO, straight to disk. Works with any Chromium browser
+  (Edge, Chrome, Chromium, Brave) — whichever one the extension was installed into. Use whenever visual evidence
   of a web page or product UI is needed: "take a screenshot of this", "show me the
   page", "capture the bug", "before and after", "how does it look on mobile",
   "put a picture in the report". Four still modes (visible area, full page,
@@ -15,6 +16,15 @@ description: >
 # edge-shot
 
 Screenshots and recordings from the browser the user is already signed into.
+
+**Which browser?** Whichever one the extension was loaded into at install time — Edge if
+the user has it, otherwise Chrome (or Chromium/Brave). You do not choose this per call and
+you do not need to: `shot health` reports the connected browser under `browsers`. Everything
+below works identically in all of them.
+
+If `health` lists **more than one** browser, every command is refused on purpose. Tab ids
+are per-browser, so a capture from the wrong one would look perfectly correct. Tell the user
+to remove the extension from one of the browsers.
 
 ## Commands
 
@@ -100,9 +110,10 @@ protect anything.
 
 | Symptom | Cause and remedy |
 |---|---|
-| `extension not connected` | Edge is not running, or the service worker stopped. Click the extension icon once. After a server restart, reconnection can take up to a minute. |
+| `extension not connected` | The browser is not running, or the service worker stopped. Click the extension icon once. After a server restart, reconnection can take up to a minute. |
+| `TWO BROWSERS are connected` | The extension is loaded into more than one browser. Tab ids clash, so nothing runs until one copy is removed. |
 | `selector matched nothing` | Run `probe`. The element may be inside an iframe (the query runs on the main document) or not rendered yet — try `--settle 1500`. |
-| `Cannot access chrome:// and edge:// URLs` | Browser rule, not fixable. |
+| `Cannot access chrome:// and edge:// URLs` | The browser forbids extensions from reading its own internal pages. Not fixable. |
 | `N tabs match the pattern` | Use one of the `--tab <id>` values printed. |
 | `a recording is running on tab …` | Another session is recording. Wait, or `rec-stop --force` if it is yours. |
 | `RELOAD REFUSED` | The extension source does not compile. Reloading broken source would leave the worker dead and unreachable. Fix the reported error first. |

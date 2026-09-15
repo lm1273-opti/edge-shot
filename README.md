@@ -1,7 +1,11 @@
 # edge-shot
 
-Lossless screenshots and real-time screen recordings from your **logged-in Microsoft Edge**,
-straight to disk, driven from the command line or from an AI coding agent.
+Lossless screenshots and real-time screen recordings from **the browser you are already
+signed into**, straight to disk, driven from the command line or from an AI coding agent.
+
+Works with any Chromium browser: **Edge, Chrome, Chromium, Brave**. The installer picks
+whichever you have (Edge first, then Chrome) and prints the right instructions. The name
+comes from where the project started, not from a requirement.
 
 It exists because the usual ways of getting a picture out of a signed-in browser are bad:
 a GIF recorder gives you 256 colours and blurred UI text, "save to disk" often saves nothing,
@@ -33,9 +37,9 @@ shot rec-stop                                 # -> real-time MP4
 
 ## Requirements
 
-- macOS (the JPEG twin uses `sips`; everything else is cross-platform)
-- Microsoft Edge, or any Chromium browser that loads MV3 extensions
+- A Chromium browser that can load an unpacked MV3 extension: Edge, Chrome, Chromium or Brave
 - Node.js 18 or newer
+- macOS for the downscaled JPEG twin (it uses `sips`); everything else is cross-platform
 - `ffmpeg` on your PATH, only if you want video
 
 ## Install
@@ -49,9 +53,15 @@ cd edge-shot
 The installer generates a private token, writes the two config files, and prints the one manual
 step that cannot be automated:
 
-1. open `edge://extensions`
+1. open the extensions page it names for you (`edge://extensions`, `chrome://extensions`, …)
 2. turn on **Developer mode**
 3. **Load unpacked** and pick the `extension/` folder of this repo
+
+Load it into **one** browser only. Tab ids are per-browser, so a second copy would make
+`--tab 42` ambiguous; the server notices two browsers connected and refuses to work rather
+than guessing, because a capture from the wrong browser would look perfectly correct.
+
+To choose the browser yourself, set `EDGE_SHOT_BROWSER=Chrome` before running the installer.
 
 Then check it:
 
@@ -64,7 +74,7 @@ The local server starts itself on demand; there is nothing to run in the backgro
 ## How it works
 
 ```
-CLI ──POST──▶ server (127.0.0.1) ◀──long-poll── Edge extension
+CLI ──POST──▶ server (127.0.0.1) ◀──long-poll── browser extension
                    │                                  │
                    │                        chrome.debugger / tabs
                    ▼                                  ▼
@@ -110,8 +120,9 @@ Written and measured on macOS with Edge 153 and Node 26. Elsewhere:
 - **Linux / Windows**: everything works except the downscaled JPEG twin, which uses the
   macOS `sips` tool. The installer warns, and the capture command reports it rather than
   producing a silently missing file.
-- **Chrome instead of Edge**: the extension uses the standard `chrome.*` APIs and loads
-  the same way; only the `edge://extensions` address differs.
+- **Any Chromium browser**: the extension uses the standard `chrome.*` APIs, so Edge, Chrome,
+  Chromium and Brave all work identically; only the extensions-page address differs, and the
+  installer prints the right one. `shot health` reports which browser is actually connected.
 - **Port in use**: `EDGE_SHOT_PORT=9000 ./install.sh` writes the port into both config
   files. Re-running the installer keeps whatever port is already configured.
 - **Tab ids change** when the browser restarts, so never store a `--tab` value; run

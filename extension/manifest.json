@@ -1,10 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "Edge Shot (Claude)",
+  "name": "edge-shot",
   "version": "1.0.0",
-  "description": "Veszteségmentes képernyőképek kérésre a Claude Code számára, egy loopback szerveren keresztül.",
-  "permissions": ["tabs", "debugger", "scripting", "alarms"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "sw.js", "type": "module" },
-  "action": { "default_title": "Edge Shot — kattints az újracsatlakozáshoz" }
+  "description": "Lossless screenshots and recordings for the edge-shot CLI. Works in any Chromium browser (Edge, Chrome, Chromium, Brave).",
+  "permissions": [
+    "tabs",
+    "debugger",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "edge-shot — click to reconnect"
+  }
 }
