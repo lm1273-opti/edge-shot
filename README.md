@@ -50,9 +50,34 @@ cd edge-shot
 ./install.sh
 ```
 
-The installer generates a private token, writes the two config files, installs the Claude
-skill if you say yes, and then prints the one step that cannot be automated: loading the
-extension into your browser.
+The installer checks for Node.js 18+, generates a private token, writes the two config
+files (`config.json` and `extension/config.js`, both mode `600`), asks whether to install
+the Claude skill, and then prints the one step that cannot be automated: loading the
+extension into your browser. Re-running it is safe: an existing `config.json` keeps its
+token and port.
+
+### Non-interactive install (agents, CI)
+
+Every question has a flag, so the script runs to completion without a terminal:
+
+```bash
+./install.sh --yes --json          # install the skill too, machine-readable summary
+./install.sh --no-skill --json     # never install the skill
+./install.sh --help                # every flag, variable and exit code
+```
+
+| Flag / variable | Effect |
+|---|---|
+| `-y`, `--yes` or `EDGE_SHOT_ASSUME_YES=1` | Answer yes to every question (installs the Claude skill). Without it, a non-interactive run skips the skill: it is a prompt that changes an agent's behaviour, so it is never installed silently. |
+| `--no-skill` | Never install the skill (wins over `--yes`). |
+| `--json` | Print a JSON summary on stdout (`status`, `port`, `browser`, `extensionDir`, `skill`, `manualStep`, …); notes go to stderr. Implies non-interactive. |
+| `EDGE_SHOT_PORT=8765` | Server port, 1–65535. Ignored once `config.json` exists (its stored port is kept). |
+| `EDGE_SHOT_BROWSER=Chrome` | `Edge`, `Chrome`, `Chromium` or `Brave`; overrides detection. |
+
+Exit codes: **0** installed or already installed (`"status"` in the JSON says which) ·
+**2** usage error · **3** `node` missing or older than 18 · **4** invalid port ·
+**5** existing `config.json` unreadable or without a token ·
+**6** configs written but no Chromium browser found (set `EDGE_SHOT_BROWSER`).
 
 ### Loading the extension
 
@@ -265,7 +290,8 @@ machine because *you* sent it. The tool does not do it for you; it also does not
 
 `skill/SKILL.md` is a Claude Code skill: it teaches the agent when to reach for a screenshot,
 which mode actually proves the point, and which traps to avoid. The installer asks whether to
-copy it to `~/.claude/skills/edge-shot/SKILL.md`, and never overwrites an existing one.
+copy it to `~/.claude/skills/edge-shot/SKILL.md` (`--yes` answers for you, `--no-skill`
+declines), and never overwrites an existing one.
 
 Install it deliberately. A skill is a prompt that changes how an AI agent behaves, so it is the
 most sensitive file in this repository — read it before you say yes, especially in a fork.
