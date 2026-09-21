@@ -165,6 +165,7 @@ shot probe --selector "<css>"    # what a selector matches, and how big
 shot check                       # does the extension source compile
 shot reload                      # reload the extension after changing its code
 shot rec-status                  # is a recording running, how many frames so far
+shot join <name> --clip a.mp4::"BEFORE" --clip b.mp4::"AFTER"   # clips into one video
 shot --help                      # everything below, from the tool itself
 ```
 
@@ -194,9 +195,38 @@ shot <name> [--tab <id> | --match <text>] [options]
 ```bash
 shot rec-start <name> [--quality low|normal|high] [--selector "<css>"] [--gif]
 #   … drive the page …
-shot rec-stop [--force]
+shot rec-stop [--force] [--verify | --no-verify]
 shot rec <name> --seconds 1-120  # fixed length, start and stop in one command
 ```
+
+`rec-stop` does not just hand you a file, it tells you whether the file is worth trusting:
+
+| It prints | What it means |
+|---|---|
+| `FIGYELEM: az utolsó N másodpercben NEM érkezett kocka` | No frames arrived for the last N seconds. The video ends on a frozen picture even though its duration is complete. |
+| `FIGYELEM: N másodperces kocka-szünet` | The same gap, but in the middle of the recording. |
+| `SZAKASZOK` table | One row per main-frame navigation, with the frame count and URL of each stretch. A row with zero frames gets its own warning. |
+| `FIGYELEM: a debugger lecsatolódott` | The debugger detached mid-recording; the extension retries the attach up to three times, but part of the recording may be missing. |
+| `ELLENŐRZŐ KOCKÁK` | Still frames extracted from the finished video: the start, one after each navigation, and the end. Look at them before you call the video evidence. |
+
+Verification stills are written automatically when the recording contains a navigation.
+`--verify` forces them, `--no-verify` turns them off.
+
+**Joining clips.** A long scene is more reliable as several short clips than as one long
+recording: a spoiled stretch can be re-recorded on its own, and a mistake shows up
+immediately. `shot join` stitches them back together with a header bar per clip, so a
+viewer can tell which half is which.
+
+```bash
+shot join before-after \
+  --clip 1203-before.mp4::"BEFORE · main" \
+  --clip 1214-after.mp4::"AFTER · the fix"
+```
+
+A label starting with `BEFORE`/`ELŐTTE` gets a red strip, `AFTER`/`UTÁNA` a green one.
+The command also writes a still from the end of each section, for the same reason as above.
+Drawing the bar needs `python3` with Pillow, because many ffmpeg builds ship without
+`drawtext`; the command says so plainly if it is missing.
 
 Every capture writes a lossless PNG plus a width-capped JPEG twin (or an MP4) into
 `~/.claude/screenshots/<date>/`, and prints both paths, the pixel size, and the title and
@@ -264,6 +294,14 @@ Timing is real: on a page carrying its own on-screen clock, the counter advanced
   the tool refuses to photograph a *different* tab and tells you who is recording and where.
 - **A static page produces almost no frames**, because the screencast is change-driven. The
   recording is still the right length, but it is effectively a still image, and the tool says so.
+- **A recording's duration proves nothing; its frames do.** A recording that froze part way
+  through still has the full duration, a believable frame count and a believable frame rate.
+  Measured on 2026-09-21: two 70-second recordings froze in the middle and nothing in the
+  output said so; only a frame pulled out with ffmpeg showed it. The tool now measures the
+  symptom rather than guessing the cause, because the symptom is always the same whatever
+  stopped the frames: it reports any gap longer than three seconds, and the frame count of
+  each stretch between navigations. Falsified both ways: a deliberately stopped page reported
+  `az utolsó 24,06 másodpercben NEM érkezett kocka`, and healthy recordings stayed silent.
 - **Full-page mode can equal viewport mode** in apps that scroll inside an inner container. That
   is correct behaviour; use element mode on the scrolling container instead.
 - **The browser's own pages** (`edge://…`, `chrome://…`) cannot be captured. Browsers

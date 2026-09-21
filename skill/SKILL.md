@@ -53,14 +53,18 @@ Video, for an event sequence:
 ```bash
 $S rec-start flow --tab 42 --quality high [--selector "<css>"] [--gif]
 #   … drive the page however you like …
-$S rec-stop
+$S rec-stop                                # [--verify | --no-verify]
 $S rec quick-clip --tab 42 --seconds 8     # fixed length, one step
 $S rec-status
+
+# several clips into one video, with a header bar per section
+$S join before-after --clip a.mp4::"BEFORE · main" --clip b.mp4::"AFTER · the fix"
 ```
 
 Flags: `--mode viewport|fullpage|element`, `--selector`, `--padding`, `--tab <id>`,
 `--match <text>`, `--mobile [width]`, `--scale 1-4`, `--settle <ms>`, `--url`,
-`--session <id>`, `--seconds 1-120`, `--quality low|normal|high`, `--gif`, `--force`.
+`--session <id>`, `--seconds 1-120`, `--quality low|normal|high`, `--gif`, `--force`,
+`--verify` / `--no-verify` (verification stills on `rec-stop`), `--clip` (repeatable, `join`).
 
 Output goes to `~/.claude/screenshots/<date>/` (configurable via `outRoot` in
 `config.json`): a lossless PNG plus a width-capped JPEG twin, or an MP4.
@@ -97,6 +101,27 @@ Output goes to `~/.claude/screenshots/<date>/` (configurable via `outRoot` in
   says so loudly.
 - **Video crop is measured at the start.** If the element moves or resizes during the
   recording, the crop does not follow.
+- **A recording's duration proves nothing; look at its frames.** A recording that froze
+  part way through still has the full duration, a believable frame count and a believable
+  frame rate. Measured on 2026-09-21: two 70-second recordings froze mid-scene and nothing
+  in the output revealed it; only a frame pulled out with ffmpeg did. So `rec-stop` now
+  reports any frame gap longer than three seconds (at the end or in the middle), a
+  per-navigation table of frame counts with the URL of each stretch, and a detached
+  debugger. A stretch with zero frames gets its own warning. Falsified both ways: a
+  deliberately stopped page reported a 24.06 second gap, healthy recordings stayed silent.
+- **Verification stills are written for you.** When a recording contains a navigation,
+  `rec-stop` extracts the start frame, one frame after each navigation and the final frame
+  into `<video>-kockak/`. **Read them before you write a caption** — the caption is a claim,
+  and the duration is not evidence for it.
+- **Record a multi-step scene as several clips, then `join` them.** This turned out more
+  reliable than one long recording: a short clip shows its own failure at once, and a
+  spoiled stretch can be re-recorded alone. `join` labels each section (a `BEFORE` label
+  gets a red strip, `AFTER` green) and writes a still from the end of each one.
+- **What the tool does NOT claim.** The extension re-arms the screencast after a main-frame
+  navigation and retries the attach up to three times after a detach, but the freeze that
+  motivated this could not be reproduced in isolation: a plain same-origin navigation was
+  followed correctly even by the older code (818 frames, 25.9 fps, ending on the right
+  page). Treat the measurement as the safeguard, not the fix.
 
 ## Several agent sessions, one browser
 

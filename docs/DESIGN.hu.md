@@ -240,3 +240,65 @@ Cél: ember és AI-ügynök is végig tudja vinni, utóbbi terminál nélkül.
 - **A skill soha nem települ némán.** Egy skill olyan prompt, ami egy AI-ügynök viselkedését
   módosítja, tehát a legnagyobb bizalmi lépés a telepítésben: interaktívan kérdez, nem
   interaktívan kihagyja, és megmondja, mivel telepíthető utólag.
+
+---
+
+# 7. kör (2026-09-21) — a befagyott felvétel, és miért a MÉRÉS a javítás
+
+Kiváltó eset: egy több lépéses, valódi terméken rögzített előtte/utána felvétel-pár
+**befagyott a jelenet közepén**, és ezt semmi nem jelezte. A `rec-stop` kimenete
+tökéletesnek látszott: 72,7 másodperc, 340 kocka, 4,7 kocka/mp, helyes URL. A hibát csak
+az mutatta meg, hogy ffmpeg-gel kibontottam a végkockát, és azon a navigáció ELŐTTI lap
+volt. Egy bizonyíték-eszköznél ez a legrosszabb hibafajta: nem hibázik, hanem hazudik.
+
+## Az első diagnózis MEGDŐLT
+
+A kézenfekvő magyarázat az volt, hogy a screencast nem éli túl a lapváltást, mert a
+dokumentumhoz kötött. Ezt megírtam (fő-keretes navigáció után újrafegyverzés, lecsatolás
+után háromszori visszacsatolás), majd **falszifikáltam**: visszatettem a RÉGI bővítményt, és
+lefuttattam ugyanazt a két lap közötti navigációt.
+
+A régi kód hibátlanul követte: **818 kocka, 25,9 kocka/mp, a végén a helyes lap.**
+
+Vagyis a sima, azonos eredetű navigáció nem töri el a felvételt, és a valódi befagyás okát
+izolált teszten nem sikerült reprodukálni. A javítás bennmaradt, mert önmagában helyes és
+olcsó, de **feltételezésként van jelölve**, nem megoldásként. Egy nem reprodukált hibára
+írt javítás nem bizonyíték.
+
+## Amit helyette csináltunk: a tünetet mérjük, nem az okot
+
+A befagyott felvétel MINDIG ugyanúgy néz ki, bármi okozza (lapváltás, lecsatolt debugger,
+összeomlott renderer, rejtett fül): a kockák egy ponton elfogynak, a videó hossza viszont a
+teljes ablakot kiteszi. Ezért nem okot detektálunk:
+
+- **Kockaszünet-riasztás.** A `rec-stop` kiírja a leghosszabb kocka-szünetet és a végén lévő
+  néma sávot, 3 másodperces küszöbbel. Falszifikálva mindkét irányban: egy szándékosan
+  megállított lapon `az utolsó 24,06 másodpercben NEM érkezett kocka`, egészséges
+  felvételeknél néma marad.
+- **Szakasz-tábla.** A bővítmény jelzi a fő-keretes navigációkat, a szerver szakaszokra
+  bontja a kockákat, és a `rec-stop` szakaszonként kiírja a kocka-számot és az URL-t. A
+  nulla kockás szakasz kiemelt figyelmeztetést kap. Mérve: 3 szakasz, 284 / 295 / 306 kocka.
+- **Lecsatolás kiírása.** A `detachReason`-t a szerver eddig is gyűjtötte, de a CLI **soha
+  nem írta ki**. Egy lecsatolt debugger tehát némán elvitte a felvétel felét. Most látszik.
+- **Ellenőrző kockák.** Navigációt tartalmazó felvételnél a `rec-stop` kirak egy
+  `<videó>-kockak/` könyvtárat: kezdet, minden navigáció után egy, és a vég. Ez teszi
+  egylépésessé azt az ellenőrzést, amit a doksi eddig csak kért, de nem támogatott.
+
+## `shot join` — mert a hosszú felvétel rossz alapértelmezés
+
+A kiváltó esetet végül úgy sikerült rögzíteni, hogy a jelenetet szakaszokra bontottam, és
+utólag fűztem össze. Ez általánosítható: a rövid klip hibája azonnal látszik, és egy
+elrontott szakaszt külön lehet újravenni. A `join` ezt teszi egy paranccsá, szakaszonkénti
+fejléc-sávval, mert címke nélkül az összefűzött videó bizonyítéknak használhatatlan: a
+nézőnek tudnia kell, melyik fele melyik.
+
+A sávot **nem** az ffmpeg `drawtext`-je rajzolja: a mért gépen az ffmpeg libfreetype nélkül
+fordult, tehát a `drawtext` szűrő nem is létezik. Helyette python3 + Pillow rajzolja a PNG-t,
+és az ffmpeg csak ráfedi. A parancs kimondja, ha a Pillow hiányzik, nem hal el némán.
+
+## Egy mellék-lelet a CLI-ben
+
+A `--clip` ismételhető kapcsoló, de az argumentum-értelmező eddig felülírta az ismétlést. A
+gyűjtés **fehérlistára** került, nem általánosra: egy általános gyűjtés egy véletlenül kétszer
+megadott `--match`-et tömbbé tenne, amit a többi parancs sztringként használ, és az némán
+rossz fülre fotózna. Egy bizonyíték-eszközben a néma rossz cél rosszabb, mint a hiba.

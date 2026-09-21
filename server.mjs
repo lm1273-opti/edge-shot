@@ -283,8 +283,70 @@ async function encode(rec) {
       '-vf', `${filters.join(',')},fps=10,split[a][b];[a]palettegen[p];[b][p]paletteuse`, gif]);
   }
 
+  // ── Ellenőrző kockák ──────────────────────────────────────────────────────────
+  // A videó hossza semmit nem igazol: egy lapváltásnál befagyott felvétel is teljes
+  // hosszú. Az egyetlen olcsó ellenőrzés a KOCKA megnézése, ezért kirakjuk őket fájlba,
+  // hogy egy Read-del ránézhess. Alapból minden navigációt tartalmazó felvételnél fut.
+  let verifyDir = null; let verifyFiles = [];
+  const wantVerify = rec.verify === true || (rec.verify !== false && (rec.navs || []).length > 0);
+  if (wantVerify) {
+    verifyDir = mp4.replace(/\.mp4$/, '-kockak');
+    fs.mkdirSync(verifyDir, { recursive: true, mode: 0o700 });
+    const totalSec = picked.length / RESAMPLE_FPS;
+    const marks = [{ t: Math.min(0.3, totalSec / 2), tag: 'kezdet' }];
+    (rec.navs || []).forEach((n, i) => {
+      const idx = picked.findIndex((f) => f.seq > n.seq);
+      if (idx >= 0) marks.push({ t: Math.min(totalSec - 0.2, idx / RESAMPLE_FPS + 1.0), tag: `nav${i + 1}` });
+    });
+    marks.push({ t: Math.max(0, totalSec - 0.3), tag: 'veg' });
+    for (const m of marks) {
+      const out = path.join(verifyDir, `${String(Math.round(m.t)).padStart(3, '0')}s-${m.tag}.jpg`);
+      try {
+        await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(m.t),
+          '-i', mp4, '-frames:v', '1', '-vf', 'scale=900:-2', '-q:v', '5', out]);
+        verifyFiles.push(out);
+      } catch { /* egy kimaradt ellenőrző kocka nem buktathatja a felvételt */ }
+    }
+  }
+
+  // ── Szakaszok a navigációk mentén ─────────────────────────────────────────────
+  // Egy szakasz = két fő-keretes navigáció közötti kockák. A 0 kockás szakasz az a
+  // néma hiba, amiért ez az egész könyvelés készült: a videó hossza és a teljes
+  // kocka-szám ilyenkor is hibátlannak látszik.
+  const navs = (rec.navs || []).slice().sort((a, b) => a.seq - b.seq);
+  const bounds = [0, ...navs.map((n) => n.seq)];
+  const segments = bounds.map((from, i) => {
+    const to = i + 1 < bounds.length ? bounds[i + 1] : Infinity;
+    const inSeg = rec.frames.filter((f) => f.seq > from && f.seq <= to);
+    return {
+      index: i,
+      url: i === 0 ? (rec.tabUrl || null) : (navs[i - 1]?.url || null),
+      frames: inSeg.length,
+      // A szakasz kezdete a KÓDOLT idővonalon, hogy a verify-kocka oda essen.
+      startSec: inSeg.length
+        ? Math.max(0, Number((picked.findIndex((f) => f.seq === inSeg[0].seq) / RESAMPLE_FPS).toFixed(2)))
+        : null,
+    };
+  });
+  const emptySegments = segments.filter((s2) => s2.frames === 0).length;
+
   const wallSec = wallEnd - wallStart;
   const frameSpan = rec.frames.length > 1 ? rec.frames[rec.frames.length - 1].ts - rec.frames[0].ts : 0;
+
+  // ── Kockaszünet-detektor (ok-független) ───────────────────────────────────────
+  // A befagyott felvétel MINDIG ugyanígy néz ki, bármi okozta (lapváltás, lecsatolt
+  // debugger, összeomlott renderer, rejtett fül): a kockák egy ponton elfogynak, a
+  // videó hossza viszont a teljes ablakot kiteszi. Ezért nem az OKOT mérjük, hanem a
+  // TÜNETET: a leghosszabb kocka-szünetet és a felvétel végén lévő néma sávot.
+  // Mérve 2026-09-21: két 70 másodperces felvétel fagyott be egy SPA-ban, és az
+  // akkori kimenetben (hossz, kocka-szám, fps) SEMMI nem utalt rá.
+  const ordered = rec.frames.map((f) => f.ts).sort((x, y) => x - y);
+  let maxGapSec = 0, maxGapAtSec = null;
+  for (let i = 1; i < ordered.length; i++) {
+    const g = ordered[i] - ordered[i - 1];
+    if (g > maxGapSec) { maxGapSec = g; maxGapAtSec = ordered[i - 1] - ordered[0]; }
+  }
+  const tailGapSec = ordered.length ? Math.max(0, wallEnd - ordered[ordered.length - 1]) : wallSec;
   const result = {
     wallSec: Number(wallSec.toFixed(2)),
     frameSpanSec: Number(frameSpan.toFixed(2)),
@@ -297,6 +359,11 @@ async function encode(rec) {
     hiddenSec: Number((rec.hiddenSec || 0).toFixed(2)),
     detachReason: rec.detachReason || null,
     crop: rec.crop || null, cropScale: rec.cropScale ?? null,
+    segments, emptySegments, navCount: navs.length,
+    maxGapSec: Number(maxGapSec.toFixed(2)),
+    maxGapAtSec: maxGapAtSec == null ? null : Number(maxGapAtSec.toFixed(2)),
+    tailGapSec: Number(tailGapSec.toFixed(2)),
+    verifyDir, verifyFiles,
     quality: rec.preset, tabUrl: rec.tabUrl,
   };
   // Hiba esetén a nyers kockák MARADNAK; csak siker után takarítunk.
@@ -426,6 +493,18 @@ async function handleRequest(req, res) {
     return send(res, 200, { ok: true });
   }
 
+  // Szakaszhatár: a bővítmény jelzi a fő-keretes navigációt. Ebből lesz a rec-stop
+  // szakaszonkénti kocka-statisztikája, ami MEGFOGJA a lapváltásnál befagyott felvételt.
+  if (url.pathname === '/rec/nav' && req.method === 'POST') {
+    let nbody = '';
+    for await (const c of req) nbody += c;
+    let nav; try { nav = JSON.parse(nbody || '{}'); } catch { return send(res, 400, { error: 'hibás JSON' }); }
+    const rec = recordings.get(nav.recId);
+    if (!rec || rec.state !== 'recording') return send(res, 200, { ok: true, drop: true });
+    rec.navs.push({ seq: Number(nav.seq) || 0, url: nav.url || null, at: Date.now() });
+    return send(res, 200, { ok: true });
+  }
+
   if (url.pathname === '/rec/start' && req.method === 'POST') {
     // A törzs olvasása ELŐBB: a check és az assign közé nem kerülhet await, különben két
     // egyidejű indítás mindkettője átjut az ellenőrzésen (TOCTOU), és a második hibaága
@@ -446,7 +525,7 @@ async function handleRequest(req, res) {
     const recId = randomUUID().slice(0, 8);
     const rec = {
       recId, name: opts.name, owner: opts.session || 'anon', dir: recDir(recId),
-      frames: [], state: 'starting',
+      frames: [], navs: [], state: 'starting',
       startedAt: Date.now(), stamp: stamp(), preset: opts.quality || 'normal',
       gif: !!opts.gif, crf: opts.crf, hiddenSec: 0,
     };
@@ -504,6 +583,7 @@ async function handleRequest(req, res) {
       return send(res, 409, { error: `a felvételt "${rec.owner}" birtokolja (te: "${who}"). Ha tényleg le akarod állítani: shot rec-stop --force` });
     }
     rec.state = 'stopping';
+    if (typeof sopts.verify === 'boolean') rec.verify = sopts.verify;
     if (rec.capTimer) { clearTimeout(rec.capTimer); rec.capTimer = null; }
     if (!rec.stoppedAt) rec.stoppedAt = Date.now();
     try {

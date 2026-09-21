@@ -268,6 +268,47 @@ async function jpegSize(dataB64) {
   } catch { return { w: null, h: null }; }
 }
 
+// A screencast újrafegyverzése. Idempotens: a Page.startScreencast egy már futó
+// castot újraindít, ezért a kétszeres hívás (frameNavigated + loadEventFired)
+// ártalmatlan. A késleltetés MÉRT szükséglet: a navigáció utáni első pillanatban a
+// renderer még nem rajzol, és az azonnali indítás kockátlan castot adott.
+function rearmCast(state, why) {
+  if (!state.castParams) return;
+  state.rearms++;
+  setTimeout(() => {
+    if (rec !== state) return;
+    chrome.debugger.sendCommand(state.target, 'Page.startScreencast', state.castParams, () => {
+      const err = chrome.runtime.lastError;
+      if (err) console.warn('[edge-shot] a screencast újrafegyverzése elbukott (' + why + '):', err.message);
+    });
+  }, 300);
+}
+
+// Folyamat-váltós navigáció után a debugger lecsatolódhat. Visszacsatolunk, újra
+// engedélyezzük a Page domaint, és újraindítjuk a castot.
+async function reattachCast(state) {
+  if (rec !== state) return;
+  try {
+    await chrome.debugger.attach(state.target, '1.3');
+    await send(state.target, 'Page.enable');
+    await send(state.target, 'Page.startScreencast', state.castParams);
+    state.detached = null;
+    console.warn('[edge-shot] visszacsatoltam a felvételt lecsatolás után:', state.recId);
+  } catch (e) {
+    console.warn('[edge-shot] a visszacsatolás elbukott:', e?.message || e);
+  }
+}
+
+// A szakaszhatárt a szerver is megkapja, hogy a rec-stop szakaszonként tudjon
+// kocka-számot mondani. Tűzz-és-felejts: egy elveszett jelzés nem buktathatja a felvételt.
+function reportNav(state, seq, url) {
+  fetch(`${BASE}/rec/nav`, {
+    method: 'POST',
+    headers: { ...HDR, 'content-type': 'application/json' },
+    body: JSON.stringify({ recId: state.recId, seq, url }),
+  }).catch(() => { /* a stop úgyis kiírja a szakaszokat a saját könyveléséből */ });
+}
+
 async function recStart(job) {
   // A szerver csak akkor küld recstart-ot, ha NÁLA nincs aktív felvétel. Ha itt mégis van
   // egy, az árva (a szerver újraindult vagy összeomlott): zárjuk le, ne holtpontoljunk.
@@ -284,6 +325,13 @@ async function recStart(job) {
     recId: job.recId, target, tabId: tab.id, restore, seq: 0,
     ackDelayMs: job.ackDelayMs || 0, hiddenSince: null, hiddenSec: 0,
     onEvent: null, onDetach: null, firstSize: null,
+    // Lapváltás-könyvelés. A screencast a DOKUMENTUMHOZ kötött:
+    // egy fő-keretes navigáció után a böngésző NEM küld több kockát, hacsak újra nem
+    // fegyverezzük. Enélkül a felvétel a navigáció előtti lapon befagy, miközben a
+    // hossza és a kocka-száma hibátlannak LÁTSZIK — ez a legrosszabb fajta néma hiba
+    // egy bizonyíték-eszközben. Mérve 2026-09-21: két 70 mp-es felvétel, mindkettő a
+    // lapváltásnál fagyott be, és a rec-stop kimenete ezt semmivel nem jelezte.
+    castParams: null, navs: [], framesSinceNav: 0, rearms: 0, reattaches: 0,
   };
 
   try {
@@ -318,10 +366,11 @@ async function recStart(job) {
       cssRect = result;
     }
 
-    await send(target, 'Page.startScreencast', {
+    state.castParams = {
       format: 'jpeg', quality: job.quality, maxWidth: job.maxWidth,
       maxHeight: 4000, everyNthFrame: 1,
-    });
+    };
+    await send(target, 'Page.startScreencast', state.castParams);
 
     state.onEvent = (src, method, params) => {
       if (src.tabId !== state.tabId) return;
@@ -334,7 +383,25 @@ async function recStart(job) {
         }
         return;
       }
+      // Fő-keretes navigáció: jelöljük a szakaszhatárt, és fegyverezzük újra a
+      // screencastot. A `parentId` hiánya azonosítja a fő keretet; az iframe-ek
+      // navigációja (egy beágyazott vászon is az) nem szakaszhatár és nem is töri el a
+      // kockafolyamot, ezért azokra NEM indítunk újra semmit.
+      if (method === 'Page.frameNavigated' && !params.frame?.parentId) {
+        state.navs.push({ seq: state.seq, url: params.frame?.url || null, at: Date.now() });
+        state.framesSinceNav = 0;
+        reportNav(state, state.seq, params.frame?.url || null);
+        rearmCast(state, 'frameNavigated');
+        return;
+      }
+      // A load után még egyszer, DE csak ha tényleg nem jött kocka: a felesleges
+      // újraindítás egy működő felvételnél kockát ejtene.
+      if (method === 'Page.loadEventFired') {
+        if (state.framesSinceNav === 0) rearmCast(state, 'loadEventFired');
+        return;
+      }
       if (method !== 'Page.screencastFrame') return;
+      state.framesSinceNav++;
       const seq = ++state.seq;
       const ts = params.metadata?.timestamp ?? Date.now() / 1000;
       const data = params.data;
@@ -342,7 +409,17 @@ async function recStart(job) {
       if (state.ackDelayMs) setTimeout(ack, state.ackDelayMs); else ack();
       sendFrame(state, seq, ts, data);
     };
-    state.onDetach = (src, reason) => { if (src.tabId === state.tabId) state.detached = reason || 'ismeretlen ok'; };
+    // A lecsatolás nem feltétlenül végleges: egy folyamat-váltós navigáció is leválthatja
+    // a debuggert. Korlátozott számú visszacsatolást megkísérlünk, de a tényt MEGTARTJUK
+    // a jelentésben, hogy a szakasz-statisztika mellett látszódjon, mi történt.
+    state.onDetach = (src, reason) => {
+      if (src.tabId !== state.tabId) return;
+      state.detached = reason || 'ismeretlen ok';
+      if (rec !== state) return;
+      if (state.reattaches >= 3) return;
+      state.reattaches++;
+      setTimeout(() => { void reattachCast(state); }, 250);
+    };
     chrome.debugger.onEvent.addListener(state.onEvent);
     chrome.debugger.onDetach.addListener(state.onDetach);
 
@@ -405,6 +482,7 @@ async function recStop(job) {
   return {
     stopped: true, frames: state.seq, hiddenSec: state.hiddenSec,
     frameSize: state.firstSize, detachReason: state.detached || null,
+    navs: state.navs, rearms: state.rearms, reattaches: state.reattaches,
   };
 }
 

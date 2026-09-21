@@ -53,6 +53,11 @@ function num(v, name, { min, max, integer } = {}) {
   return n;
 }
 
+// Az ismételhető kapcsolók FEHÉRLISTÁN vannak, nem általánosan gyűjtünk: az általános
+// gyűjtés egy véletlenül kétszer megadott --match-et tömbbé tenne, amit a többi parancs
+// sztringként használ, és a hiba némán rossz fülre fotózna.
+const REPEATABLE = new Set(['clip']);
+
 function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -60,8 +65,9 @@ function parseArgs(argv) {
     if (a.startsWith('--')) {
       const k = a.slice(2);
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) out[k] = true;
-      else { out[k] = next; i++; }
+      const val = (next === undefined || next.startsWith('--')) ? true : (i++, next);
+      if (REPEATABLE.has(k)) (out[k] ||= []).push(val);
+      else out[k] = val;
     } else out._.push(a);
   }
   return out;
@@ -94,6 +100,7 @@ Videó (eseménysorhoz, nem állóképhez):
   shot rec-stop                     lezár, kódol, kiírja az útvonalat
   shot rec <nev> --seconds 8        fix hosszú felvétel egy lépésben
   shot rec-status                   fut-e felvétel, hány kocka van meg
+  shot join <nev> --clip a.mp4::ELŐTTE --clip b.mp4::UTÁNA     klipek egy videóba, címke-sávval
   shot rec-stop --force             idegen session felvételének leállítása (tudatosan)
 
 Több párhuzamos session:
@@ -206,7 +213,8 @@ if (cmd === 'rec-start' || cmd === 'rec') {
 }
 
 if (cmd === 'rec-stop' || cmd === 'rec') {
-  const r = await post('/rec/stop', { session: sessionId(a.session), force: !!a.force });
+  const verify = a['no-verify'] ? false : (a.verify ? true : undefined);
+  const r = await post('/rec/stop', { session: sessionId(a.session), force: !!a.force, verify });
   const j = r.body;
   if (!r.ok) { console.error(`HIBA: ${j.error}`); process.exit(1); }
   console.log(`\nMP4  ${j.mp4Path}  (${kbFmt(j.mp4Bytes)})`);
@@ -217,9 +225,144 @@ if (cmd === 'rec-stop' || cmd === 'rec') {
   if (j.sizes.length > 1) console.log(`FIGYELEM: a kockaméret változott a felvétel alatt (${j.sizes.join(', ')}) — a videó nyújtva lehet.`);
   if (j.measuredFps < 2) console.log(`FIGYELEM: mindössze ${j.frames} kocka ${j.wallSec} másodperc alatt. A lap gyakorlatilag nem rajzolt: a videó szinte állókép. Ha mozgást vártál, a fül vagy háttérbe került, vagy tényleg nem történt semmi.`);
   if (j.hiddenSec > 0.5) console.log(`FIGYELEM: a fül ${j.hiddenSec} másodpercig rejtve volt; ez alatt NINCS kocka, a videó befagyva mutatja.`);
+  // Kockaszünet: a befagyott felvétel egyetlen megbízható jele. Bármi okozza (lapváltás,
+  // lecsatolt debugger, összeomlott renderer), a tünet ugyanaz, és a hossz elrejti.
+  if (j.tailGapSec >= 3) {
+    console.log(`\nFIGYELEM: az utolsó ${j.tailGapSec} másodpercben NEM érkezett kocka. A videó vége befagyott képet mutat, pedig a hossza teljes. Ha a jelenet vége a lényeg, ez a felvétel HASZNÁLHATATLAN bizonyítéknak.`);
+  }
+  if (j.maxGapSec >= 3 && j.tailGapSec < 3) {
+    console.log(`\nFIGYELEM: ${j.maxGapSec} másodperces kocka-szünet a felvétel ${j.maxGapAtSec}. másodperce körül. A videó ott befagyva mutatja a képet.`);
+  }
+  if (j.detachReason) {
+    console.log(`FIGYELEM: a debugger lecsatolódott a felvétel alatt (${j.detachReason}). Ez a leggyakoribb néma kocka-vesztés.`);
+  }
+  // Szakaszonkénti kocka-szám: ez fogja meg a lapváltásnál befagyott felvételt, amit a
+  // teljes hossz és a teljes kocka-szám ELREJT.
+  if (j.navCount > 0) {
+    console.log(`\nSZAKASZOK  ${j.navCount} lapváltás a felvétel alatt:`);
+    for (const s of j.segments || []) {
+      const flag = s.frames === 0 ? '  ← NULLA KOCKA' : '';
+      const at = s.startSec == null ? '' : `  @${s.startSec}s`;
+      console.log(`  ${s.index + 1}. ${String(s.frames).padStart(5)} kocka${at}${flag}   ${(s.url || '?').slice(0, 78)}`);
+    }
+  }
+  if (j.emptySegments > 0) {
+    console.log(`\nFIGYELEM: ${j.emptySegments} szakaszban NULLA kocka érkezett. A videó ezt a részt a lapváltás ELŐTTI lapon mutatja, tehát a felvétel hiányos, akkor is, ha a hossza teljesnek látszik. NE használd bizonyítékként anélkül, hogy megnézted volna a kockákat.`);
+  }
+  if (j.verifyFiles && j.verifyFiles.length) {
+    console.log(`\nELLENŐRZŐ KOCKÁK  ${j.verifyDir}`);
+    for (const f of j.verifyFiles) console.log(`  ${f}`);
+    console.log('  Nézd meg őket, mielőtt bizonyítéknak nevezed a videót: a hossz semmit nem igazol.');
+  }
   if (j.stopError) console.log(`MEGJEGYZÉS: a leállítás hibázott (${j.stopError}), de a meglévő kockákból kódoltam.`);
   if (/-\d+\.mp4$/.test(j.mp4Path)) console.log('MEGJEGYZÉS: a név foglalt volt (másik session), ezért toldalékot kapott.');
   console.log(`URL  ${j.tabUrl}`);
+  process.exit(0);
+}
+
+// ── shot join ─────────────────────────────────────────────────────────────────
+// Több felvételt EGY videóvá fűz, szakaszonként címke-sávval. Azért van, mert az
+// előtte/utána bizonyíték eddig kézi ffmpeg + PIL kört igényelt minden alkalommal,
+// és a címke nélküli összefűzés bizonyítéknak használhatatlan: a nézőnek tudnia kell,
+// melyik fele melyik. A lapváltás-biztos felvétel is jellemzően TÖBB klip, mert a
+// jelenet szakaszokra bomlik.
+if (cmd === 'join') {
+  const name = a._[1];
+  const clips = [].concat(a.clip || []).filter(Boolean);
+  if (!name || clips.length < 2) {
+    console.error('használat: shot join <nev> --clip <mp4>[::<cimke>] --clip <mp4>[::<cimke>] [...]');
+    console.error('  A cimke a kep tetejen futo savba kerul. Ha "ELŐTTE"/"UTÁNA" szoval kezdodik, szinezve.');
+    process.exit(1);
+  }
+  const py = spawnSync('python3', ['-c', 'import PIL; print(PIL.__version__)'], { encoding: 'utf8' });
+  if (py.status !== 0) {
+    console.error('HIBA: a cimke-sav rajzolasahoz python3 + Pillow kell (ez az ffmpeg-build drawtext nelkul fordult).');
+    process.exit(1);
+  }
+  const parsed = clips.map((c) => {
+    const i = String(c).indexOf('::');
+    const file = i < 0 ? String(c) : String(c).slice(0, i);
+    const label = i < 0 ? path.basename(file, '.mp4') : String(c).slice(i + 2);
+    if (!fs.existsSync(file)) { console.error(`HIBA: nincs ilyen fájl: ${file}`); process.exit(1); }
+    return { file: path.resolve(file), label };
+  });
+  // Egységes szélesség: a legkisebb közös, párosra vágva. Eltérő méretű klipek
+  // összefűzése különben némán nyújtana.
+  const dims = parsed.map((c) => {
+    const r = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height', '-of', 'csv=p=0', c.file], { encoding: 'utf8' });
+    const [w, hh] = (r.stdout || '').trim().split(',').map(Number);
+    return { w, h: hh };
+  });
+  const W = Math.min(...dims.map((d) => d.w)) & ~1;
+  const H = Math.min(...dims.map((d) => d.h)) & ~1;
+  if (!W || !H) { console.error('HIBA: nem sikerült kiolvasni a klipek méretét (ffprobe).'); process.exit(1); }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'edge-shot-join-'));
+  const BAR = 46;
+  const made = [];
+  for (const [i, c] of parsed.entries()) {
+    const png = path.join(tmp, `bar${i}.png`);
+    const script = `
+import sys
+from PIL import Image, ImageDraw, ImageFont
+W, BAR, label, out = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
+low = label.lower()
+col = (200,50,70) if low.startswith(('elotte','előtte','before')) else ((45,107,82) if low.startswith(('utana','utána','after')) else (90,97,110))
+img = Image.new('RGB', (W, BAR), (20,23,29)); d = ImageDraw.Draw(img)
+try:
+    fb = ImageFont.truetype('/System/Library/Fonts/Supplemental/Arial Bold.ttf', 21)
+except Exception:
+    fb = ImageFont.load_default()
+d.rectangle([0,0,8,BAR], fill=col)
+d.text((24, (BAR-24)//2), label, font=fb, fill=(255,255,255))
+img.save(out)
+`;
+    const pr = spawnSync('python3', ['-c', script, String(W), String(BAR), c.label, png], { encoding: 'utf8' });
+    if (pr.status !== 0) { console.error(`HIBA: a címke-sáv rajzolása elbukott: ${pr.stderr}`); process.exit(1); }
+    const out = path.join(tmp, `c${i}.mp4`);
+    const fr = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', c.file, '-i', png,
+      '-filter_complex', `[0:v]scale=${W}:${H},pad=${W}:${H + BAR}:0:${BAR}:color=0x14171d[v];[v][1:v]overlay=0:0,fps=30,format=yuv420p[o]`,
+      '-map', '[o]', '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', out], { encoding: 'utf8' });
+    if (fr.status !== 0) { console.error(`HIBA: a klip feliratozása elbukott: ${fr.stderr}`); process.exit(1); }
+    made.push(out);
+  }
+  const list = path.join(tmp, 'list.txt');
+  fs.writeFileSync(list, made.map((f) => `file '${f}'`).join('\n') + '\n');
+  const day = new Date().toLocaleDateString('sv-SE');
+  const time = new Date().toTimeString().slice(0, 8).replace(/:/g, '');
+  const outDir = path.join(os.homedir(), '.claude', 'screenshots', day);
+  fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+  let mp4 = path.join(outDir, `${time}-${name}.mp4`);
+  for (let n = 2; fs.existsSync(mp4); n++) mp4 = path.join(outDir, `${time}-${name}-${n}.mp4`);
+  const cc = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', mp4], { encoding: 'utf8' });
+  if (cc.status !== 0) { console.error(`HIBA: az összefűzés elbukott: ${cc.stderr}`); process.exit(1); }
+
+  // Ellenőrző kockák szakaszonként: ugyanaz az elv, mint a rec-stop-nál.
+  const vdir = mp4.replace(/\.mp4$/, '-kockak');
+  fs.mkdirSync(vdir, { recursive: true, mode: 0o700 });
+  let acc = 0; const stills = [];
+  for (const [i, f] of made.entries()) {
+    const d = Number((spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'csv=p=0', f], { encoding: 'utf8' }).stdout || '0').trim());
+    acc += d;
+    const at = Math.max(0, acc - 0.4);
+    const out = path.join(vdir, `${String(i + 1).padStart(2, '0')}-veg.jpg`);
+    spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(at),
+      '-i', mp4, '-frames:v', '1', '-vf', 'scale=900:-2', '-q:v', '5', out]);
+    if (fs.existsSync(out)) stills.push(out);
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+  const total = Number((spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
+    '-of', 'csv=p=0', mp4], { encoding: 'utf8' }).stdout || '0').trim());
+  console.log(`\nMP4  ${mp4}  (${Math.round(fs.statSync(mp4).size / 1024)} KB)`);
+  console.log(`HOSSZ  ${total.toFixed(1)} s   SZAKASZ  ${parsed.length}   MÉRET  ${W}×${H + BAR}`);
+  parsed.forEach((c, i) => console.log(`  ${i + 1}. ${c.label}`));
+  if (stills.length) {
+    console.log(`\nELLENŐRZŐ KOCKÁK (szakaszvégek)  ${vdir}`);
+    for (const f of stills) console.log(`  ${f}`);
+    console.log('  Nézd meg őket: egy befagyott szakasz csak a kockán látszik, a hosszon nem.');
+  }
   process.exit(0);
 }
 
