@@ -22,7 +22,8 @@ the user has it, otherwise Chrome (or Chromium/Brave). You do not choose this pe
 you do not need to: `shot health` reports the connected browser under `browsers`. Everything
 below works identically in all of them.
 
-If `health` lists **more than one** browser, every command is refused on purpose. Tab ids
+Each entry is `<name>#<id>`; the id tells apart two copies that share a name (Edge and
+Edge Beta, two profiles). If `health` lists **more than one** browser, every command is refused on purpose. Tab ids
 are per-browser, so a capture from the wrong one would look perfectly correct. Tell the user
 to remove the extension from one of the browsers.
 
@@ -34,6 +35,7 @@ S=<path-to-repo>/shot          # or put it on your PATH
 $S health                      # is the server up, is the extension connected
 $S tabs                        # open tabs: id, title, URL
 $S probe --selector "<css>" --tab <id>    # what does this selector match, and how big
+$S text --tab <id> [--selector "<css>"] [--max 8000] [--links]   # the page's TEXT, no image
 $S check                       # does the extension source compile
 $S reload                      # reload the extension after a code change
 ```
@@ -63,6 +65,7 @@ $S join before-after --clip a.mp4::"BEFORE · main" --clip b.mp4::"AFTER · the 
 
 Flags: `--mode viewport|fullpage|element`, `--selector`, `--padding`, `--tab <id>`,
 `--match <text>`, `--mobile [width]`, `--scale 1-4`, `--settle <ms>`, `--url`,
+`--tiles` / `--no-tiles` (tall images: automatic),
 `--session <id>`, `--seconds 1-120`, `--quality low|normal|high`, `--gif`, `--force`,
 `--verify` / `--no-verify` (verification stills on `rec-stop`), `--clip` (repeatable, `join`).
 
@@ -71,10 +74,16 @@ Output goes to `~/.claude/screenshots/<date>/` (configurable via `outRoot` in
 
 **Read the JPG, not the PNG.** The command prints the JPG first. It shows the same thing
 at a fraction of the size; the DPR-2 PNG is the lossless archive for the user, and reading
-it into context costs far more for no visible gain.
+it into context costs far more for no visible gain. When the command prints `CSEMPÉK`
+(tiles), the image was too tall to read in one piece: read only the tiles you need,
+`-t01` being the top of the page.
 
 ## How to use it well
 
+0. **Ask whether you need a picture at all.** If the question is what the page *says* (an
+   error message, a value, whether a row exists), `$S text --selector "<css>"` answers it for
+   a fraction of an image's cost, without bringing the tab to the front. Take a picture when
+   the layout, the look or the proof for a human is the point.
 1. **Target explicitly with `--tab <id>`**, from `$S tabs`. `--match` refuses when the
    pattern hits more than one tab, because picking the first one silently photographs
    the wrong page.

@@ -61,6 +61,12 @@ const BROWSER_TTL = 60_000;
 function liveBrowsers() {
   const now = Date.now();
   for (const [b, t] of browsers) if (now - t > BROWSER_TTL) browsers.delete(b);
+  // Egy azonosító nélküli régi bejegyzés („Edge") és egy azonosítós („Edge#ab12cd34")
+  // ugyanaz a böngésző a bővítmény újratöltése után: különben a `shot reload` után 60 s-ig
+  // hamis „két böngésző" tiltás lenne.
+  for (const b of browsers.keys()) {
+    if (!b.includes('#') && [...browsers.keys()].some((o) => o.startsWith(b + '#'))) browsers.delete(b);
+  }
   return [...browsers.keys()];
 }
 
@@ -159,8 +165,18 @@ async function persist(job, dataUrl, meta) {
     const jpgPath = pngPath.replace(/\.png$/, '.jpg');
     const jpg = Buffer.from(meta.jpegDataUrl.replace(/^data:image\/jpeg;base64,/, ''), 'base64');
     fs.writeFileSync(jpgPath, jpg);
+    // Magas képnél a csempék a beolvasható változat: mind a modell képkorlátján belül.
+    const tilePaths = [];
+    if (Array.isArray(meta.jpegTiles)) {
+      meta.jpegTiles.forEach((t, i) => {
+        const tp = pngPath.replace(/\.png$/, `-t${String(i + 1).padStart(2, '0')}.jpg`);
+        fs.writeFileSync(tp, Buffer.from(String(t).replace(/^data:image\/jpeg;base64,/, ''), 'base64'));
+        tilePaths.push(tp);
+      });
+    }
     return {
       pngPath, pngBytes: png.length, jpgPath, jpgBytes: jpg.length, jpgErr: null,
+      tilePaths, tileHeight: meta.tileHeight ?? null,
       width: meta.width ?? null, height: meta.height ?? null,
       jpgWidth: meta.jpegWidth ?? null, jpgHeight: meta.jpegHeight ?? null,
       tabUrl: meta?.tabUrl ?? null, tabTitle: meta?.tabTitle ?? null,
@@ -456,7 +472,7 @@ async function handleRequest(req, res) {
   // --- extension oldal -------------------------------------------------
   if (url.pathname === '/poll' && req.method === 'GET') {
     extensionLastSeen = Date.now();
-    if (req.headers['x-browser']) browsers.set(String(req.headers['x-browser']).slice(0, 20), Date.now());
+    if (req.headers['x-browser']) browsers.set(String(req.headers['x-browser']).slice(0, 40), Date.now());
     if (queue.length) return send(res, 200, queue.shift());
     waiters.push(res);
     res.__holdTimer = setTimeout(() => {
@@ -669,6 +685,16 @@ async function handleRequest(req, res) {
     // A szondázás nem hozza előre a fület (executeScript háttérben is fut), ezért egy
     // futó felvételt nem zavar: nincs mit tiltani.
     try { return send(res, 200, await enqueue(job)); }
+    catch (e) { return send(res, 502, { error: e.message }); }
+  }
+
+  // Szöveg kép helyett. Nem hoz előre fület, ezért felvétel alatt is szabad.
+  if (url.pathname === '/text' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    const tb = parseBody(body, res); if (!tb) return;
+    const mbt = jobBlocked(); if (mbt) return send(res, 409, { error: mbt });
+    try { return send(res, 200, await enqueue({ ...tb, id: randomUUID(), kind: 'text' })); }
     catch (e) { return send(res, 502, { error: e.message }); }
   }
 

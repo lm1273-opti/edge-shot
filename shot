@@ -62,7 +62,7 @@ function num(v, name, { min, max, integer } = {}) {
 const REPEATABLE = new Set(['clip']);
 // Az érték nélküli kapcsolók SOSEM nyelik el a következő szót: különben a
 // `shot rec --gif klip --seconds 5` alakban a „klip" a --gif értéke lett, és név nem maradt.
-const BOOLEAN = new Set(['url', 'gif', 'force', 'verify', 'no-verify', 'help']);
+const BOOLEAN = new Set(['url', 'gif', 'force', 'verify', 'no-verify', 'help', 'tiles', 'no-tiles', 'links']);
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -85,6 +85,8 @@ edge-shot — veszteségmentes képernyőkép a bejelentkezett böngésződből,
   shot health                       a szerver és az extension állapota
   shot tabs                         a nyitott fülek (id, cím, URL)
   shot probe --selector "<css>"     mit talál a selector, és mekkora (elem-mód előtt)
+  shot text [--selector "<css>"]    a lap/elem SZÖVEGE kép helyett (olcsó, fület nem hoz előre)
+            [--max <karakter>] [--links]   alap: 8000 karakter; --links: a linkek listája
   shot check                        fordul-e a bővítmény forrása (reload előtt automatikus)
   shot reload                       a bővítmény újratöltése kódváltozás után
   shot <név> [kapcsolók]            kép készítése
@@ -98,6 +100,7 @@ Kapcsolók:
   --mobile [szélesség]              mobil viewport-emuláció (alap: 390)
   --scale <n>                       device pixel ratio, alapértelmezés 2
   --settle <ms>                     várakozás a fotó előtt
+  --tiles / --no-tiles              magas kép csempékre bontása (alap: automatikus)
   --url                             fehér sáv a kép tetején, benne feketén az URL
                                     (bug-jegyhez, ahol a konvenció a látszó címsáv)
 
@@ -391,6 +394,29 @@ if (cmd === 'rec-status') {
   process.exit(0);
 }
 
+if (cmd === 'text') {
+  const payload = {
+    selector: typeof a.selector === 'string' ? a.selector : undefined,
+    match: typeof a.match === 'string' ? a.match : undefined,
+    tabId: num(a.tab, 'tab', { integer: true, min: 1 }),
+    maxChars: num(a.max, 'max', { integer: true, min: 100, max: 200000 }) ?? 8000,
+    links: !!a.links,
+  };
+  const r = await post('/text', payload);
+  const j = r.body;
+  if (!r.ok) { console.error(`HIBA: ${j.error}`); process.exit(1); }
+  console.log(`FÜL  ${j.tabTitle}`);
+  console.log(`URL  ${j.tabUrl}`);
+  console.log(`KARAKTER  ${j.chars}${j.truncated ? `  (LEVÁGVA ${payload.maxChars}-nál; szűkíts --selector-ral, vagy --max)` : ''}`);
+  console.log('');
+  console.log(j.text || '(üres)');
+  if (j.links) {
+    console.log(`\nLINKEK  ${j.links.length}`);
+    for (const l of j.links) console.log(`  ${l.text || '(szöveg nélkül)'}  →  ${l.href}`);
+  }
+  process.exit(0);
+}
+
 if (cmd === 'probe') {
   const sel = a.selector || a._[1];
   if (!sel) { console.error('használat: shot probe --selector "<css>" [--match <szöveg>|--tab <id>]'); process.exit(1); }
@@ -443,10 +469,23 @@ if (cmd === 'reload') {
   const r = await fetch(`${BASE}/reload`, { method: 'POST', headers: HDR });
   const j = await r.json();
   if (!r.ok) { console.error(j.error); process.exit(1); }
-  await sleep(1500);
-  const h2 = await health();
-  console.log(h2?.extensionConnected ? 'bővítmény újratöltve, csatlakozva ✓' : 'újratöltve, de még nem csatlakozott — várj pár másodpercet');
-  process.exit(0);
+  // Az `extensionConnected` a RÉGI worker utolsó pollja miatt még egy percig igaz: arra
+  // hagyatkozva a „csatlakozva ✓" akkor is kiíródott, ha az új worker el sem indult
+  // (MÉRVE: letiltott fejlesztői mód mellett a bővítmény újratöltéskor kikapcsol).
+  // Ezért csak az újratöltés UTÁNI pollt fogadjuk el.
+  const reloadAt = Date.now() + 500;
+  let fresh = false;
+  for (let i = 0; i < 40 && !fresh; i++) {
+    await sleep(500);
+    const h2 = await health();
+    const ago = h2?.extensionLastSeenMsAgo;
+    fresh = typeof ago === 'number' && Date.now() - ago > reloadAt;
+  }
+  if (fresh) { console.log('bővítmény újratöltve, csatlakozva ✓'); process.exit(0); }
+  console.error('újratöltve, de 20 s alatt NEM csatlakozott újra.');
+  console.error('  Nézd meg a bővítmények oldalán: be van kapcsolva? (Kikapcsolt fejlesztői módnál a böngésző');
+  console.error('  újratöltéskor letiltja a kicsomagolt bővítményt.) Ha igen, kattints egyszer az ikonjára.');
+  process.exit(1);
 }
 
 if (cmd === 'tabs') {
@@ -469,6 +508,7 @@ const job = {
   scale: num(a.scale, 'scale', { min: 1, max: 4 }),
   settleMs: num(a.settle, 'settle', { min: 0, max: 10000 }),
   urlBar: !!a.url,
+  tiles: a['no-tiles'] ? false : (a.tiles ? true : undefined),
 };
 if (a.mobile) {
   const w = a.mobile === true ? 390 : num(a.mobile, 'mobile', { integer: true, min: 200, max: 2000 });
@@ -499,7 +539,10 @@ const kb = (n) => n == null ? '?' : `${Math.round(n / 1024)} KB`;
 // veszteségmentes archívum; beolvasva sokszor több tokenbe kerül ugyanazért a látványért.
 if (j.jpgPath) console.log(`JPG  ${j.jpgPath}  (${j.jpgWidth ? `${j.jpgWidth}×${j.jpgHeight}, ` : ''}${kb(j.jpgBytes)}) — ezt nézd meg / ezt tedd artifactba`);
 console.log(`PNG  ${j.pngPath}  (${j.width}×${j.height}, ${kb(j.pngBytes)}) — veszteségmentes archívum`);
-if (j.jpgHeight && j.jpgWidth && j.jpgHeight > j.jpgWidth * 3) {
+if (j.tilePaths && j.tilePaths.length) {
+  console.log(`CSEMPÉK  ${j.tilePaths.length} db, egyenként ${j.jpgWidth}×≤${j.tileHeight} (átfedéssel) — magas kép: ezeket nézd meg, ne az egész JPG-t, és csak azt, amelyik kell (t01 = a lap teteje)`);
+  for (const t of j.tilePaths) console.log(`  ${t}`);
+} else if (j.jpgHeight && j.jpgWidth && j.jpgHeight > j.jpgWidth * 3) {
   console.log(`FIGYELEM: a kép ${Math.round(j.jpgHeight / j.jpgWidth)}× magasabb, mint széles. Beolvasáskor a modell a hosszabb oldalt kicsinyíti, így a szöveg olvashatatlan lesz: fotózz inkább viewportot vagy --mode element részletet.`);
 }
 if (/-\d+\.png$/.test(j.pngPath)) console.log('MEGJEGYZÉS: a név foglalt volt (másik session), ezért toldalékot kapott.');

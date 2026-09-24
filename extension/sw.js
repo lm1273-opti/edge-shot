@@ -15,7 +15,24 @@ function detectBrowser() {
 }
 const BROWSER = detectBrowser();
 
-const HDR = { 'x-shot-token': TOKEN, 'x-browser': BROWSER };
+// A név nem azonosít: az Edge és az Edge Beta (vagy két Chrome-profil) egyaránt „Edge"
+// / „Chrome", így két betöltött bővítmény egynek látszott, és a `--tab` a rossz
+// példányba mehetett. Ezért minden példány kap egy TARTÓS azonosítót. Tartós kell
+// legyen: a service worker gyakran újraindul, és egy friss azonosító minden indulásnál
+// 60 s-ig hamis „két böngésző" tiltást adna.
+let HDR = { 'x-shot-token': TOKEN, 'x-browser': BROWSER };
+async function instanceId() {
+  try {
+    const { instanceId: got } = await chrome.storage.local.get('instanceId');
+    if (got) return got;
+    const id = crypto.randomUUID().slice(0, 8);
+    await chrome.storage.local.set({ instanceId: id });
+    return id;
+  } catch { return null; }  // storage nélkül is működjön, csak névvel
+}
+const ready = instanceId().then((id) => {
+  if (id) HDR = { ...HDR, 'x-browser': `${BROWSER}#${id}` };
+});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let looping = false;
@@ -198,7 +215,7 @@ async function capture(job) {
       dataUrl = bar.dataUrl;
       barPx = bar.barPx;
     }
-    const twin = await jpegTwin(dataUrl, job.jpegMaxPx, job.jpegQuality);
+    const twin = await jpegTwin(dataUrl, job.jpegMaxPx, job.jpegQuality, job.tiles);
     return { dataUrl, barPx, scaleUsed: metrics.deviceScaleFactor, ...twin, ...meta };
   } finally {
     try { await send(target, 'Emulation.clearDeviceMetricsOverride'); } catch { /* takarítás */ }
@@ -268,7 +285,30 @@ async function withUrlBar(dataUrl, url, scale) {
 // `sips`-re támaszkodott, így Linuxon/Windowson se méret, se iker nem lett, és Claude a
 // DPR 2-es PNG-t olvasta be (sokszoros token-költség). A böngésző mindenhol tud JPEG-et.
 // A szélességet korlátozzuk, sosem a leghosszabb oldalt (lásd DESIGN: a 68 px-es szilánk).
-async function jpegTwin(pngDataUrl, maxPx, quality) {
+// Egy csempe mérete a modell képkorlátjához igazodik (~1,15 MP, hosszabb oldal ≤ 1568):
+// ennél nagyobbat beolvasáskor úgyis kicsinyítene, és a szöveg olvashatatlanná válna.
+// A csempék átfednek, hogy a határra eső sor egyikben egészben látszódjon.
+const TILE_MAX_PX = 1_150_000;
+const TILE_OVERLAP = 48;
+
+async function jpegTiles(canvas, w, h, q) {
+  const tileH = Math.max(400, Math.min(1568, Math.floor(TILE_MAX_PX / w)));
+  const step = tileH - TILE_OVERLAP;
+  const tiles = [];
+  for (let y = 0; y < h; y += step) {
+    const th = Math.min(tileH, h - y);
+    if (tiles.length && th <= TILE_OVERLAP) break;  // csak átfedés maradt: nincs új tartalom
+    const c = new OffscreenCanvas(w, th);
+    c.getContext('2d').drawImage(canvas, 0, y, w, th, 0, 0, w, th);
+    tiles.push(await blobToDataUrl(await c.convertToBlob({ type: 'image/jpeg', quality: q })));
+    if (y + th >= h) break;
+  }
+  return { tiles, tileH };
+}
+
+// `tiles`: true = mindig, false = soha, undefined = automatikusan, ha a kép legalább
+// két csempényi magas (ekkor az egyben olvasott JPEG már olvashatatlan lenne).
+async function jpegTwin(pngDataUrl, maxPx, quality, tiles) {
   try {
     const bmp = await createImageBitmap(await (await fetch(pngDataUrl)).blob());
     const width = bmp.width, height = bmp.height;
@@ -281,9 +321,16 @@ async function jpegTwin(pngDataUrl, maxPx, quality) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(bmp, 0, 0, w, h);
     bmp.close();
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: (quality ?? 55) / 100 });
+    const q = (quality ?? 55) / 100;
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: q });
     const jpegDataUrl = await blobToDataUrl(blob);
-    return { width, height, jpegDataUrl, jpegWidth: w, jpegHeight: h };
+    const out = { width, height, jpegDataUrl, jpegWidth: w, jpegHeight: h };
+    const autoTileH = Math.max(400, Math.min(1568, Math.floor(TILE_MAX_PX / w)));
+    if (tiles === true || (tiles !== false && h > autoTileH * 2)) {
+      const t = await jpegTiles(canvas, w, h, q);
+      if (t.tiles.length > 1) { out.jpegTiles = t.tiles; out.tileHeight = t.tileH; }
+    }
+    return out;
   } catch (e) {
     return { jpegErr: String(e?.message || e) };
   }
@@ -563,11 +610,52 @@ async function probe(job) {
   return result;
 }
 
+// A lap SZÖVEGE kép helyett: ha a kérdés az, hogy mi áll a lapon (hibaüzenet, érték,
+// lista), a szöveg töredék tokenből megválaszolja, és a fület sem kell előrehozni.
+async function pageText(job) {
+  const tab = await resolveTab(job);
+  if (tab.discarded) await wakeTab(tab.id);
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (sel, links) => {
+      let root = document.body;
+      if (sel) {
+        try { root = document.querySelector(sel); }
+        catch (e) { return { error: `hibás selector: ${e.message}` }; }
+        if (!root) return { error: `a selector nem talált elemet: ${sel}` };
+      }
+      const text = (root?.innerText || '')
+        .split('\n').map((l) => l.replace(/[ \t\u00a0]+/g, ' ').trim()).join('\n')
+        // Az üres sorok a <p>-k közt tokenbe kerülnek, információt nem hordoznak.
+        .replace(/\n{2,}/g, '\n').trim();
+      const out = { text };
+      if (links) {
+        const seen = new Set();
+        out.links = [...(root?.querySelectorAll('a[href]') || [])]
+          .map((a) => ({ text: (a.innerText || a.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 80), href: a.href }))
+          .filter((l) => l.href && !l.href.startsWith('javascript:') && !seen.has(l.href) && seen.add(l.href))
+          .slice(0, 200);
+      }
+      return out;
+    },
+    args: [job.selector || null, !!job.links],
+  });
+  if (!result) throw new Error('a lap nem adott vissza szöveget');
+  if (result.error) throw new Error(result.error);
+  const max = job.maxChars || 8000;
+  return {
+    tabUrl: tab.url, tabTitle: tab.title, tabId: tab.id,
+    chars: result.text.length, truncated: result.text.length > max,
+    text: result.text.slice(0, max), links: result.links || null,
+  };
+}
+
 async function handle(job) {
   if (job.kind === 'recstart') return recStart(job);
   if (job.kind === 'recstop') return recStop(job);
   if (job.kind === 'tabs') return listTabs();
   if (job.kind === 'probe') return probe(job);
+  if (job.kind === 'text') return pageText(job);
   if (job.kind === 'reload') {
     // A választ még a régi kód küldi el; az újratöltés utána indul.
     setTimeout(() => chrome.runtime.reload(), 500);
@@ -580,6 +668,7 @@ async function handle(job) {
 async function loop() {
   if (looping) return;
   looping = true;
+  await ready;
   try {
     for (;;) {
       let job;

@@ -18,6 +18,7 @@ shot whole-page --tab 42 --mode fullpage      # entire document, in one piece, n
 shot the-modal --tab 42 --mode element --selector ".modal"
 shot on-mobile --tab 42 --mobile 375          # real mobile rendering, not a CSS resize
 shot bug-report --tab 42 --url                # adds a white bar with the page URL on top
+shot text --tab 42 --selector ".error"        # the TEXT instead of a picture: far cheaper
 
 shot rec-start flow --tab 42 --quality high   # record an event sequence
 #   … drive the page however you like …
@@ -162,6 +163,7 @@ The local server starts itself on demand; there is nothing to run in the backgro
 shot health                      # is the server up, which browser is connected
 shot tabs                        # open tabs: id, title, URL
 shot probe --selector "<css>"    # what a selector matches, and how big
+shot text [--selector "<css>"]   # visible text of the page or element (--max <chars>, --links)
 shot check                       # does the extension source compile
 shot reload                      # reload the extension after changing its code
 shot rec-status                  # is a recording running, how many frames so far
@@ -186,6 +188,7 @@ shot <name> [--tab <id> | --match <text>] [options]
 | `--mode element --selector "<css>"` | Just that element; `--padding <px>` adds a margin |
 | `--mobile [width]` | Mobile emulation at that CSS width (default 390), device pixel ratio 3 |
 | `--url` | Adds a white bar on top carrying the page URL, for tickets that want it visible |
+| `--tiles` / `--no-tiles` | Split the JPEG twin into overlapping tiles sized for a model's image limit. Automatic when the image is at least two tiles tall |
 | `--scale 1-4` | Device pixel ratio of the output (default 2) |
 | `--settle <ms>` | Wait before capturing, up to 10000, for pages that animate in |
 | `--session <id>` | Who you are; see the concurrency note below |
@@ -225,12 +228,20 @@ shot join before-after \
 
 A label starting with `BEFORE`/`ELŐTTE` gets a red strip, `AFTER`/`UTÁNA` a green one.
 The command also writes a still from the end of each section, for the same reason as above.
-Drawing the bar needs `python3` with Pillow, because many ffmpeg builds ship without
+Drawing the header bar needs `python3` with Pillow, because many ffmpeg builds ship without
 `drawtext`; the command says so plainly if it is missing.
 
 Every capture writes a lossless PNG plus a width-capped JPEG twin (or an MP4) into
 `~/.claude/screenshots/<date>/`, and prints both paths, the pixel size, and the title and
-URL of the tab it photographed. Use those last two when you describe the image: they are
+URL of the tab it photographed. The JPEG is printed first because it is the one to look at:
+it shows the same thing for a fraction of the bytes (and of an AI agent's tokens). A tall
+full-page capture also gets `-t01.jpg`, `-t02.jpg`, … tiles, because a single very tall
+image is shrunk on its long side when a model reads it and its text becomes illegible.
+
+**Text instead of a picture.** `shot text` returns the visible text (`innerText`) of the page
+or of one element, capped at 8000 characters (`--max`), optionally with its links (`--links`).
+When the question is *what does the page say*, this answers it without an image, and like
+`probe` and `tabs` it never brings a tab to the front, so it is allowed during a recording. Use those last two when you describe the image: they are
 what makes a caption checkable.
 
 ## Which browser am I actually driving?
@@ -244,12 +255,13 @@ $ shot health
   "ok": true,
   "port": 8765,
   "extensionConnected": true,
-  "browsers": ["Edge"]
+  "browsers": ["Edge#3f9a1c2e"]
 }
 ```
 
-If `browsers` lists **two**, every command is refused until you remove one copy, and the
-error names both browsers.
+The suffix is a random id the extension keeps in its own storage, so two copies are told
+apart even when they share a name (Edge and Edge Beta, or two profiles). If `browsers` lists
+**two**, every command is refused until you remove one copy, and the error names both.
 
 That refusal is deliberate. Guessing here would produce a screenshot that is sharp,
 correctly named, and of the wrong page — the one failure mode this tool exists to avoid.
@@ -334,6 +346,7 @@ Written and measured on macOS with Edge 153 and Node 26. Elsewhere:
 | `--match` is refused with a list of tabs | The pattern was ambiguous. Use one of the `--tab <id>` values it prints. Refusing beats silently picking the wrong tab. |
 | A selector matched nothing | Run `shot probe --selector "…" --tab <id>`. The element may be inside an iframe (the query runs on the main document) or not rendered yet (`--settle 1500`). |
 | A capture is refused because a recording is running | A recording holds its tab in the foreground; bringing another tab forward would freeze it. Wait, or `shot rec-stop`. |
+| `shot reload` says the extension did not reconnect | It waits for a poll from the *new* worker. The usual cause is Developer mode having been switched off: the browser then disables an unpacked extension when it reloads. Switch it back on and enable the card. |
 | `shot reload` refuses to run | It checks that the extension source compiles first. Reloading broken source would leave the worker dead and unreachable, recoverable only by clicking reload in the browser. |
 | A long recording contains a single frame | The page never repainted. The screencast is change-driven, so a static page yields almost nothing. The video is still the right length, and the command says so. |
 | Video fails to start | `ffmpeg` is not on your PATH (`brew install ffmpeg`). Stills do not need it. |
