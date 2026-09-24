@@ -69,6 +69,10 @@ Flags: `--mode viewport|fullpage|element`, `--selector`, `--padding`, `--tab <id
 Output goes to `~/.claude/screenshots/<date>/` (configurable via `outRoot` in
 `config.json`): a lossless PNG plus a width-capped JPEG twin, or an MP4.
 
+**Read the JPG, not the PNG.** The command prints the JPG first. It shows the same thing
+at a fraction of the size; the DPR-2 PNG is the lossless archive for the user, and reading
+it into context costs far more for no visible gain.
+
 ## How to use it well
 
 1. **Target explicitly with `--tab <id>`**, from `$S tabs`. `--match` refuses when the
@@ -82,6 +86,10 @@ Output goes to `~/.claude/screenshots/<date>/` (configurable via `outRoot` in
    the picture actually shows. The command prints the tab title and URL for this.
 5. **Prefer a still.** One image settles a state bug. Reach for video only when the
    thing you must show is movement or a sequence.
+6. **Keep it cheap.** Viewport or element mode over full page: a very tall image is shrunk
+   on its long side when you read it, so its text becomes unreadable (the command warns).
+   `probe` and `tabs` never bring a tab to the front and cost no image at all — use them
+   to aim before you shoot, instead of shooting twice.
 
 ## Behaviour worth knowing (all measured)
 
@@ -95,7 +103,8 @@ Output goes to `~/.claude/screenshots/<date>/` (configurable via `outRoot` in
 - **Full-page mode can equal viewport mode** in apps that scroll inside an inner
   container. That is correct; target the scrolling container with element mode.
 - **A recording freezes if its tab loses focus.** While a recording runs, capturing a
-  *different* tab is refused, and the error says which tab is being recorded.
+  *different* tab is refused, and the error says which tab is being recorded. `probe`
+  and `tabs` stay available, since they never touch focus.
 - **A static page yields almost no frames**, because the screencast is change-driven.
   The recording still has the right length but is effectively a still, and the command
   says so loudly.

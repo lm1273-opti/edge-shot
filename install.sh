@@ -126,7 +126,7 @@ detect_browser() {
       [[ -d "/Applications/${pair%%:*}.app" ]] && { echo "${pair##*:}"; return; }
     done
   else
-    for pair in microsoft-edge:Edge google-chrome:Chrome chromium:Chromium brave-browser:Brave; do
+    for pair in microsoft-edge:Edge google-chrome:Chrome chromium:Chromium chromium-browser:Chromium brave-browser:Brave; do
       command -v "${pair%%:*}" >/dev/null && { echo "${pair##*:}"; return; }
     done
   fi
@@ -136,13 +136,12 @@ BROWSER="$(detect_browser)"
 case "$BROWSER" in
   Edge)     EXT_URL="edge://extensions";     DEV_WHERE="bottom-left of the sidebar" ;;
   Chrome)   EXT_URL="chrome://extensions";   DEV_WHERE="top-right of the page" ;;
-  Chromium) EXT_URL="chromium://extensions"; DEV_WHERE="top-right of the page" ;;
+  Chromium) EXT_URL="chrome://extensions";   DEV_WHERE="top-right of the page" ;;  # Chromium has no chromium:// scheme
   Brave)    EXT_URL="brave://extensions";    DEV_WHERE="top-right of the page" ;;
   *)        EXT_URL="chrome://extensions";   DEV_WHERE="top-right of the page" ;;
 esac
 
 command -v ffmpeg >/dev/null || say "NOTE: ffmpeg is not on your PATH. Stills will work, video will not."
-command -v sips   >/dev/null || say "NOTE: sips is missing (not macOS?). The downscaled JPEG twin will be skipped."
 
 # --- Claude skill: never a silent default ----------------------------------------------
 # The skill is a prompt that changes an AI agent's behaviour, so installing it is the

@@ -97,6 +97,10 @@ async function wakeTab(tabId, timeoutMs = 20000) {
     const t = await chrome.tabs.get(tabId);
     if (!t.discarded && t.status === 'complete') return t;
     if (Date.now() - started > timeoutMs) {
+      // A 'loading' állapot magában nem akadály: egy örökké töltő erőforrás (analitika,
+      // stream) mellett a lap már rég kirajzolt, és a fotó így 20 s után elbukna.
+      // Csak az eldobott (renderer nélküli) fül menthetetlen.
+      if (!t.discarded) return t;
       throw new Error(`a fül nem ébredt fel ${timeoutMs} ms alatt (discarded=${t.discarded}, status=${t.status})`);
     }
     if (t.discarded) await chrome.tabs.reload(tabId);
@@ -194,7 +198,8 @@ async function capture(job) {
       dataUrl = bar.dataUrl;
       barPx = bar.barPx;
     }
-    return { dataUrl, barPx, scaleUsed: metrics.deviceScaleFactor, ...meta };
+    const twin = await jpegTwin(dataUrl, job.jpegMaxPx, job.jpegQuality);
+    return { dataUrl, barPx, scaleUsed: metrics.deviceScaleFactor, ...twin, ...meta };
   } finally {
     try { await send(target, 'Emulation.clearDeviceMetricsOverride'); } catch { /* takarítás */ }
     try { await send(target, 'Emulation.setTouchEmulationEnabled', { enabled: false }); } catch { /* takarítás */ }
@@ -214,7 +219,7 @@ async function blobToDataUrl(blob) {
   for (let i = 0; i < buf.length; i += CHUNK) {
     bin += String.fromCharCode.apply(null, buf.subarray(i, i + CHUNK));
   }
-  return 'data:image/png;base64,' + btoa(bin);
+  return `data:${blob.type || 'image/png'};base64,` + btoa(bin);
 }
 
 // Hosszú URL-t KÖZÉPEN rövidítünk: a hoszt és a záró útvonal-szakasz a beszédes rész,
@@ -257,6 +262,31 @@ async function withUrlBar(dataUrl, url, scale) {
   bmp.close();
   const out = await blobToDataUrl(await canvas.convertToBlob({ type: 'image/png' }));
   return { dataUrl: out, barPx: barH };
+}
+
+// A kicsinyített JPEG-ikret ITT készítjük, nem a szerveren: a szerver korábban a macOS-es
+// `sips`-re támaszkodott, így Linuxon/Windowson se méret, se iker nem lett, és Claude a
+// DPR 2-es PNG-t olvasta be (sokszoros token-költség). A böngésző mindenhol tud JPEG-et.
+// A szélességet korlátozzuk, sosem a leghosszabb oldalt (lásd DESIGN: a 68 px-es szilánk).
+async function jpegTwin(pngDataUrl, maxPx, quality) {
+  try {
+    const bmp = await createImageBitmap(await (await fetch(pngDataUrl)).blob());
+    const width = bmp.width, height = bmp.height;
+    const k = maxPx && width > maxPx ? maxPx / width : 1;
+    const w = Math.max(1, Math.round(width * k)), h = Math.max(1, Math.round(height * k));
+    const canvas = new OffscreenCanvas(w, h);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';            // átlátszó PNG-háttér JPEG-ben feketévé válna
+    ctx.fillRect(0, 0, w, h);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bmp, 0, 0, w, h);
+    bmp.close();
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: (quality ?? 55) / 100 });
+    const jpegDataUrl = await blobToDataUrl(blob);
+    return { width, height, jpegDataUrl, jpegWidth: w, jpegHeight: h };
+  } catch (e) {
+    return { jpegErr: String(e?.message || e) };
+  }
 }
 
 async function jpegSize(dataB64) {
@@ -416,6 +446,10 @@ async function recStart(job) {
       if (src.tabId !== state.tabId) return;
       state.detached = reason || 'ismeretlen ok';
       if (rec !== state) return;
+      // A felhasználó a „Mégse" gombbal kifejezetten leállította a hibakeresést, vagy a fül
+      // bezárult: ilyenkor a visszacsatolás vagy a felhasználó akarata ellen menne, vagy
+      // értelmetlen. A tényt a jelentés (detachReason) kimondja.
+      if (reason === 'canceled_by_user' || reason === 'target_closed') return;
       if (state.reattaches >= 3) return;
       state.reattaches++;
       setTimeout(() => { void reattachCast(state); }, 250);
@@ -499,9 +533,10 @@ async function listTabs() {
 // Elem-mód előtt: melyik selector mit talál, és mekkora. Így nem vaktában fotózunk.
 async function probe(job) {
   const tab = await resolveTab(job);
-  // A visszaállítás KELL: enélkül a szondázás egy idegen session felvételét fagyasztaná be.
-  const restore = await bringToFront(tab);
-  try {
+  // Az executeScript háttérben lévő fülön is fut: a szondázás NEM hozza előre a fület.
+  // Így nincs villanás, gyorsabb, és egy futó felvételt sem fagyaszthat be. Csak az
+  // eldobott (renderer nélküli) fület kell felébreszteni.
+  if (tab.discarded) await wakeTab(tab.id);
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: (sel) => {
@@ -526,7 +561,6 @@ async function probe(job) {
   });
   if (result?.error) throw new Error(result.error);
   return result;
-  } finally { await restore(); }
 }
 
 async function handle(job) {

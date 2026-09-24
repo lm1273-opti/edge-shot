@@ -76,9 +76,12 @@ const run = (cmd, args) => new Promise((res, rej) =>
 
 function dispatch() {
   while (queue.length && waiters.length) {
-    const job = queue.shift();
     const res = waiters.shift();
     clearTimeout(res.__holdTimer);
+    // Egy elhalt service worker poll-kapcsolata a 'close' esemény előtt még a listában
+    // lehet: ha ide küldenénk a jobot, elveszne, és csak 90 s múlva derülne ki.
+    if (res.destroyed || res.writableEnded) continue;
+    const job = queue.shift();
     send(res, 200, job);
   }
 }
@@ -139,6 +142,7 @@ function stamp() {
 }
 
 async function persist(job, dataUrl, meta) {
+  if (typeof dataUrl !== 'string') throw new Error('a bővítmény nem küldött képet');
   const b64 = dataUrl.replace(/^data:image\/png;base64,/, '');
   const png = Buffer.from(b64, 'base64');
   const { day, time } = stamp();
@@ -149,8 +153,22 @@ async function persist(job, dataUrl, meta) {
   const pngPath = claimPath(dir, base, '.png');
   fs.writeFileSync(pngPath, png);
 
-  let width = null, height = null;
-  try {
+  // A JPEG-ikret és a méretet a bővítmény adja (platformfüggetlen). A `sips` csak
+  // tartalék egy még újra nem töltött, régi bővítményhez.
+  if (typeof meta?.jpegDataUrl === 'string') {
+    const jpgPath = pngPath.replace(/\.png$/, '.jpg');
+    const jpg = Buffer.from(meta.jpegDataUrl.replace(/^data:image\/jpeg;base64,/, ''), 'base64');
+    fs.writeFileSync(jpgPath, jpg);
+    return {
+      pngPath, pngBytes: png.length, jpgPath, jpgBytes: jpg.length, jpgErr: null,
+      width: meta.width ?? null, height: meta.height ?? null,
+      jpgWidth: meta.jpegWidth ?? null, jpgHeight: meta.jpegHeight ?? null,
+      tabUrl: meta?.tabUrl ?? null, tabTitle: meta?.tabTitle ?? null,
+    };
+  }
+
+  let width = meta?.width ?? null, height = meta?.height ?? null;
+  if (!width) try {
     const out = await run('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', pngPath]);
     width = Number(/pixelWidth:\s*(\d+)/.exec(out)?.[1]) || null;
     height = Number(/pixelHeight:\s*(\d+)/.exec(out)?.[1]) || null;
@@ -174,7 +192,7 @@ async function persist(job, dataUrl, meta) {
   } catch (e) {
     // A hívó sosem látja a szerver logját (a szerver háttérben fut), ezért a hibát a
     // válaszban kell visszaadni, különben a JPEG-iker némán elmarad.
-    jpgErr = e.message;
+    jpgErr = [meta?.jpegErr, e.message].filter(Boolean).join('; ');
     jpgPath = null;
   }
 
@@ -186,14 +204,13 @@ async function persist(job, dataUrl, meta) {
 
 // A helyes szabály: nem a fotózás általában tilos felvétel alatt, hanem az, ami a
 // felvett fültől ELTÉRŐ fület hozna előre. Ugyanarra a fülre a fotózás azért tilos,
-// mert a debugger már csatolva van; a szondázás viszont nem csatol, azt engedjük.
+// mert a debugger már csatolva van. (A szondázás nem hoz előre fület, arra nem kell.)
 function recordingBlock(tabId, what) {
   if (!activeRecId) return null;
   const rec = recordings.get(activeRecId);
   if (!rec) return null;
   if (tabId && rec.tabId && Number(tabId) === Number(rec.tabId)) {
-    return what === 'szondázás' ? null
-      : `felvétel fut ezen a fülön ("${rec.name}", tulajdonos ${rec.owner}). A felvett fülről a videó a bizonyíték; állókép csak rec-stop után.`;
+    return `felvétel fut ezen a fülön ("${rec.name}", tulajdonos ${rec.owner}). A felvett fülről a videó a bizonyíték; állókép csak rec-stop után.`;
   }
   return `felvétel fut a(z) ${rec.tabUrl || '?'} fülön (tab ${rec.tabId}, tulajdonos ${rec.owner}); más fül ${what}a előhozná azt a fület, és a videó némán befagyna. Várd meg a rec-stop-ot, vagy: shot rec-stop --force`;
 }
@@ -202,8 +219,28 @@ function jobBlocked() { return multiBrowserBlock(); }
 
 function tokenOk(req) {
   const t = req.headers['x-shot-token'];
-  if (typeof t !== 'string' || t.length !== TOKEN.length) return false;
-  return timingSafeEqual(Buffer.from(t), Buffer.from(TOKEN));
+  if (typeof t !== 'string') return false;
+  // A hosszt BÁJTBAN kell egyeztetni: egy nem-ASCII fejléc karakterhossza egyezhet, a
+  // bájthossza nem, és a timingSafeEqual ilyenkor kivételt dob (500 a 401 helyett).
+  const a = Buffer.from(t), b = Buffer.from(TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// A crop-szorzót MÉRJÜK: frameW / CSS-viewport szélesség. A DPR-rel számolás
+// mérve 2,8-szeresen mellényúlna (maxWidth 1280 mellett a szorzó 0,714, nem 2).
+// Két helyről hívódik: kocka-érkezéskor, és a recstart-válasz után az addig beérkezett
+// első kockára — mozdulatlan lapon az indításkori kocka lehet az egyetlen.
+function resolveCrop(rec, fw, fh) {
+  if (rec.cropResolved || !rec.cssRect || !fw || !rec.geometry?.cssViewport?.w) return;
+  const k = fw / rec.geometry.cssViewport.w;
+  const r = rec.cssRect;
+  rec.crop = {
+    x: Math.max(0, r.x * k), y: Math.max(0, r.y * k),
+    w: Math.min(fw - Math.max(0, r.x * k), r.width * k),
+    h: Math.min((fh || 1e9) - Math.max(0, r.y * k), r.height * k),
+  };
+  rec.cropScale = Number(k.toFixed(4));
+  rec.cropResolved = true;
 }
 
 function recDir(recId) { return path.join(os.tmpdir(), 'edge-shot-rec-' + recId); }
@@ -463,31 +500,25 @@ async function handleRequest(req, res) {
   if (url.pathname === '/rec/frame' && req.method === 'POST') {
     const recId = req.headers['x-rec-id'];
     const rec = recordings.get(recId);
-    if (!rec || rec.state !== 'recording') { req.resume(); return send(res, 200, { ok: true, drop: true }); }
+    // A 'starting' állapotban érkező kocka is kell: a screencast az indításkor AZONNAL küld
+    // egy kockát, ami megelőzheti a recstart-választ. Mozdulatlan lapon gyakran ez az
+    // EGYETLEN kocka, és eldobva „NULLA kocka" hibát adna egy hibátlan felvételre.
+    if (!rec || (rec.state !== 'recording' && rec.state !== 'starting')) { req.resume(); return send(res, 200, { ok: true, drop: true }); }
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const buf = Buffer.concat(chunks);
     const seq = Number(req.headers['x-seq']);
-    if (!Number.isFinite(seq)) { req.resume(); return send(res, 400, { error: 'hiányzó vagy hibás x-seq' }); }
+    if (!Number.isFinite(seq)) return send(res, 400, { error: 'hiányzó vagy hibás x-seq' });
+    const ts = Number(req.headers['x-ts']);
+    // Egy NaN időbélyeg a mintavételezést és a szünet-detektort is csendben elrontaná.
+    if (!Number.isFinite(ts)) return send(res, 400, { error: 'hiányzó vagy hibás x-ts' });
     const file = path.join(rec.dir, String(seq).padStart(6, '0') + '.jpg');
     fs.writeFileSync(file, buf);
     const fw = Number(req.headers['x-w']) || null;
     const fh = Number(req.headers['x-h']) || null;
-    rec.frames.push({ seq, ts: Number(req.headers['x-ts']), file, w: fw, h: fh });
+    rec.frames.push({ seq, ts, file, w: fw, h: fh });
 
-    // A crop-szorzót MÉRJÜK: frameW / CSS-viewport szélesség. A DPR-rel számolás
-    // mérve 2,8-szeresen mellényúlna (maxWidth 1280 mellett a szorzó 0,714, nem 2).
-    if (!rec.cropResolved && rec.cssRect && fw && rec.geometry?.cssViewport?.w) {
-      const k = fw / rec.geometry.cssViewport.w;
-      const r = rec.cssRect;
-      rec.crop = {
-        x: Math.max(0, r.x * k), y: Math.max(0, r.y * k),
-        w: Math.min(fw - Math.max(0, r.x * k), r.width * k),
-        h: Math.min((fh || 1e9) - Math.max(0, r.y * k), r.height * k),
-      };
-      rec.cropScale = Number(k.toFixed(4));
-      rec.cropResolved = true;
-    }
+    resolveCrop(rec, fw, fh);
     if (req.headers['x-hidden-sec']) rec.hiddenSec = Number(req.headers['x-hidden-sec']);
 
     return send(res, 200, { ok: true });
@@ -500,7 +531,7 @@ async function handleRequest(req, res) {
     for await (const c of req) nbody += c;
     let nav; try { nav = JSON.parse(nbody || '{}'); } catch { return send(res, 400, { error: 'hibás JSON' }); }
     const rec = recordings.get(nav.recId);
-    if (!rec || rec.state !== 'recording') return send(res, 200, { ok: true, drop: true });
+    if (!rec || (rec.state !== 'recording' && rec.state !== 'starting')) return send(res, 200, { ok: true, drop: true });
     rec.navs.push({ seq: Number(nav.seq) || 0, url: nav.url || null, at: Date.now() });
     return send(res, 200, { ok: true });
   }
@@ -556,6 +587,8 @@ async function handleRequest(req, res) {
       rec.tabUrl = r.tabUrl;
       rec.cssRect = r.cssRect || null;
       rec.geometry = r.geometry;
+      const early = rec.frames.find((f) => f.w);
+      if (early) resolveCrop(rec, early.w, early.h);
       return send(res, 200, { ok: true, recId, ...r, preset: rec.preset });
     } catch (e) {
       recordings.delete(recId);
@@ -633,8 +666,8 @@ async function handleRequest(req, res) {
     const pb = parseBody(body, res); if (!pb) return;
     const job = { ...pb, id: randomUUID(), kind: 'probe' };
     const mb2 = jobBlocked(); if (mb2) return send(res, 409, { error: mb2 });
-    const pblock = recordingBlock(job.tabId, 'szondázás');
-    if (pblock) return send(res, 409, { error: pblock });
+    // A szondázás nem hozza előre a fület (executeScript háttérben is fut), ezért egy
+    // futó felvételt nem zavar: nincs mit tiltani.
     try { return send(res, 200, await enqueue(job)); }
     catch (e) { return send(res, 502, { error: e.message }); }
   }
@@ -662,6 +695,8 @@ async function handleRequest(req, res) {
     if (block) return send(res, 409, { error: block });
     job.id = randomUUID();
     job.kind = 'shot';
+    job.jpegMaxPx = JPEG_MAX_PX;
+    job.jpegQuality = JPEG_QUALITY;
     try {
       const r = await enqueue(job);
       const saved = await persist(job, r.dataUrl, r);

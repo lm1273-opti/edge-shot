@@ -39,7 +39,7 @@ shot rec-stop                                 # -> real-time MP4
 
 - A Chromium browser that can load an unpacked MV3 extension: Edge, Chrome, Chromium or Brave
 - Node.js 18 or newer
-- macOS for the downscaled JPEG twin (it uses `sips`); everything else is cross-platform
+- Nothing platform-specific: the downscaled JPEG twin is made by the extension itself
 - `ffmpeg` on your PATH, only if you want video
 
 ## Install
@@ -92,7 +92,7 @@ a normal search.
 | Edge | `edge://extensions` |
 | Chrome | `chrome://extensions` |
 | Brave | `brave://extensions` |
-| Chromium | `chromium://extensions` |
+| Chromium | `chrome://extensions` |
 
 **2. Turn on Developer mode.** This is the step people miss, and without it the button you
 need in step 3 does not exist at all. It is a toggle switch labelled **Developer mode** —
@@ -311,9 +311,9 @@ Timing is real: on a page carrying its own on-screen clock, the counter advanced
 
 Written and measured on macOS with Edge 153 and Node 26. Elsewhere:
 
-- **Linux / Windows**: everything works except the downscaled JPEG twin, which uses the
-  macOS `sips` tool. The installer warns, and the capture command reports it rather than
-  producing a silently missing file.
+- **Linux / Windows**: everything works, including the downscaled JPEG twin, which the
+  extension renders itself (an extension that was not reloaded since falls back to the
+  macOS `sips` tool, and the capture command says so).
 - **Any Chromium browser**: the extension uses the standard `chrome.*` APIs, so Edge, Chrome,
   Chromium and Brave all work identically; only the extensions-page address differs, and the
   installer prints the right one. `shot health` reports which browser is actually connected.
